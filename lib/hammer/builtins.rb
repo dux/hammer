@@ -5,6 +5,8 @@ class Hammer
   # * register_core - tasks always available (subject to user override
   #   via the `unless commands.key?(...)` guard): :default, :help,
   #   :update, :agents, :version. These coexist with Hammerfile tasks.
+  #   Pass `hidden: true` (the Hammerfile branch does) to keep them
+  #   dispatchable but drop them from the listing - see `hide_core`.
   #
   # * register_no_project - tasks meaningful only when no Hammerfile is
   #   loaded (or `--system` was passed): :recipes, :init. These would
@@ -13,12 +15,30 @@ class Hammer
   module Builtins
     module_function
 
-    def register_core(klass)
+    def register_core(klass, hidden: false)
+      preexisting = klass.commands.keys
       register_help(klass)    unless klass.commands.key?('help')
       register_default(klass) unless klass.commands.key?('default')
       register_update(klass)  unless klass.commands.key?('update')
       register_agents(klass)  unless klass.commands.key?('agents')
       register_version(klass) unless klass.commands.key?('version')
+      hide_core(klass, preexisting) if hidden
+    end
+
+    # When a Hammerfile owns the task tree, the core built-ins stay
+    # dispatchable but drop out of the listing so only project tasks
+    # show. Empty desc = hidden-but-callable - same convention as
+    # private helper tasks; :default already carries no desc. Only the
+    # built-ins we just registered are hidden: a command the Hammerfile
+    # defined itself (in `preexisting`) keeps its own desc.
+    CORE_HIDEABLE ||= %w[help update agents version].freeze
+
+    def hide_core(klass, preexisting)
+      CORE_HIDEABLE.each do |name|
+        next if preexisting.include?(name)
+        cmd = klass.commands[name]
+        cmd.instance_variable_set(:@desc, '') if cmd
+      end
     end
 
     def register_no_project(klass)

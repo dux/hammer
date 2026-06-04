@@ -1085,11 +1085,13 @@ class Hammer
     # Core built-ins register AFTER Hammerfile eval so user-defined
     # tasks win (the `unless commands.key?(...)` guards in register_core
     # skip the built-in when overridden - no redefinition warning).
+    # `hidden: true` keeps them dispatchable but drops them from the
+    # command listing so a project shows only its own tasks.
     # `register_no_project` (:recipes, :init) is intentionally NOT
     # called here - those would clash too easily with user tasks. Use
     # `hammer --system recipes` to reach them from inside a project.
     require_relative 'hammer/builtins'
-    Hammer::Builtins.register_core(klass)
+    Hammer::Builtins.register_core(klass, hidden: true)
 
     klass.start(argv)
   end

@@ -271,4 +271,62 @@ class BuiltinsTest < Minitest::Test
     out, = capture { klass.start(['--help']) }
     refute_includes out, 'Recipes:'
   end
+
+  # ----- hidden core built-ins (project context) --------------------
+
+  def test_register_core_hidden_blanks_core_descs
+    klass = Class.new(Hammer)
+    Hammer::Builtins.register_core(klass, hidden: true)
+    Hammer::Builtins::CORE_HIDEABLE.each do |name|
+      assert klass.commands.key?(name), "missing :#{name} after hidden register_core"
+      assert_empty klass.commands[name].desc, ":#{name} should have a blank desc when hidden"
+    end
+  end
+
+  def test_register_core_without_hidden_keeps_descs
+    klass = Class.new(Hammer)
+    Hammer::Builtins.register_core(klass)
+    refute_empty klass.commands['update'].desc
+    refute_empty klass.commands['version'].desc
+  end
+
+  def test_register_core_hidden_keeps_user_defined_desc
+    # A Hammerfile that redefines :help must keep its own desc - we only
+    # blank the built-ins we just registered.
+    klass = Class.new(Hammer) do
+      task :help do
+        desc 'my help'
+        proc { |_| }
+      end
+    end
+    Hammer::Builtins.register_core(klass, hidden: true)
+    assert_equal 'my help', klass.commands['help'].desc
+  end
+
+  def test_project_listing_hides_core_builtins
+    with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
+      out, = capture { Hammer.cli([]) }
+      assert_includes out, 'build it'                 # project task shows
+      refute_includes out, 'Rebuild + reinstall'      # :update desc
+      refute_includes out, 'Print lux-hammer version' # :version desc
+      refute_includes out, 'AGENTS.md'                # :agents desc
+    end
+  end
+
+  def test_project_core_builtins_still_dispatch
+    with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
+      out, = capture { Hammer.cli(['version']) }
+      assert_includes out, Hammer::VERSION
+    end
+  end
+
+  def test_no_hammerfile_listing_keeps_core_builtins
+    # Outside a project the built-ins are the whole CLI - they must stay
+    # visible (hidden: false on the no-Hammerfile branch).
+    with_no_hammerfile do
+      out, = capture { Hammer.cli([]) }
+      assert_includes out, 'Rebuild + reinstall'      # :update desc
+      assert_includes out, 'Print lux-hammer version' # :version desc
+    end
+  end
 end
