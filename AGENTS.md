@@ -156,17 +156,18 @@ Runtime cross-invocation:
   errors if none found anywhere up the tree (unless the invocation
   routes to a built-in - see `dispatches_to_builtin?` /
   `looks_like_builtin?`, true for bare invocation / leading flag /
-  explicit help / a built-in task name). After evaluating the
-  Hammerfile, registers the always-on core built-ins (`:default`,
-  `:help`, `:update`, `:agents`, `:version`) via
-  `Hammer::Builtins.register_core` - each guarded by
-  `unless commands.key?(...)` so a user-defined task wins silently.
-  No-project-only built-ins (`:recipes`, `:init`) are NOT registered
-  when a Hammerfile loaded - reach them with `--system`. The
-  `--system` flag is peeled off argv at the top and forces the
-  no-Hammerfile branch. Not part of the user-facing surface - don't
-  recommend it in examples; `Hammer.run` is what library users should
-  reach for.
+  explicit help / an `h:`-namespace path). After evaluating the
+  Hammerfile, registers the built-ins via `Hammer::Builtins.register`:
+  `:default` at the root (backs bare invocation, carries `--version`)
+  plus the `h:` namespace (`h:help`, `h:update`, `h:agents`,
+  `h:version`, `h:recipes`, `h:init`). The full set registers in every
+  context - living under `h:` means they can't collide with project
+  root tasks, so there's no core/no-project split. Each is guarded by
+  `unless commands.key?(...)` so a user who reopens `namespace :h` wins
+  silently. The `--system` flag is peeled off argv at the top and
+  forces the no-Hammerfile branch. Not part of the user-facing surface
+  - don't recommend it in examples; `Hammer.run` is what library users
+  should reach for.
 * `Hammer.recipe(name, argv = ARGV)` - entry for recipe stubs in PATH.
   Loads `<gem>/recipes/<name>.rb` (or its user-dir override), runs as
   a standalone CLI with `program_name = name`. No Hammerfile lookup,
@@ -239,45 +240,50 @@ explicit ADR-level discussion. Keys:
 
 ## Built-in tasks (user-overridable)
 
-`Hammer::Builtins` defines two registration entry points; both register
-**after** Hammerfile evaluation and skip each task when the user
-already defined it (`unless klass.commands.key?(name)` - no
-redefinition warning).
+`Hammer::Builtins.register(klass)` is the single registration entry
+point. It runs **after** Hammerfile evaluation and skips each task when
+the user already defined it (`unless commands.key?(name)` - no
+redefinition warning). The same set registers in every context (project
+or bare binary): `:default` at the root, everything else under the
+reserved `h:` namespace.
 
-* `register_core(klass)` - always called. Registers `:default`,
-  `:help`, `:update`, `:agents`, `:version`. These coexist with
-  Hammerfile tasks.
-* `register_no_project(klass)` - called only on the no-Hammerfile
-  branch of `Hammer.cli` (which `--system` also routes through).
-  Registers `:recipes` and `:init` - tasks that would collide too
-  easily with user tasks inside a project.
+* Root: `:default` (hidden, carries `--version` / `-v`).
+* `h:` namespace: `h:help`, `h:update`, `h:agents`, `h:version`,
+  `h:recipes`, `h:init`.
 
-No reserved namespace. Names like `:self`, `:recipes`, `:update` can
-all be defined freely in a Hammerfile; the built-ins yield.
+`h:` is the reserved built-in namespace - keeping the tool-meta commands
+there means they never collide with a project's root tasks, so there's
+no core/no-project split and no hidden-desc bookkeeping. Other names
+(`:self`, `:recipes` at the root, ...) stay free for Hammerfiles. The
+`h:` subclass is flagged `@builtin_namespace`, which prunes it from the
+compact listing - the built-ins are always dispatchable but only show
+(under an `h:` section) in the extended `--help` view.
 
 Task contracts:
 
-* `:default` - hidden (no desc). Just prints `self.class.root.print_help`
-  (brief). Fires for bare `hammer` and leading-flag invocations where
-  the first token starts with `-` and isn't `-h` / `--help` (see
+* `:default` - hidden (no desc), at the root. Prints
+  `self.class.root.print_help` (brief) and exposes a `--version` flag.
+  Fires for bare `hammer` and leading-flag invocations where the first
+  token starts with `-` and isn't `-h` / `--help` (see
   `Hammer.dispatch`). User overrides typically declare flag opts and
   fall through to `hammer :help` when none matched.
-* `:help` - has a desc, shows in listings. Calls
-  `self.class.root.print_help(opts[:args].first, extended: true)`.
-  Fires for `help` / `-h` / `--help` at the top level.
-* `:update` / `:agents` / `:version` - thin wrappers around
+* `h:help` - has a desc; shows in the `--help` listing. Calls
+  `self.class.root.print_help(opts[:args].first, extended: true)`. The
+  conventional `help` / `-h` / `--help` at the top level still reach it
+  (handled directly in `Hammer.dispatch`).
+* `h:update` / `h:agents` / `h:version` - thin wrappers around
   `Hammer.self_update` / `Hammer.print_ai_help` / `puts Hammer::VERSION`.
-* `:recipes` - all recipe-management actions on one task, picked via
+* `h:recipes` - all recipe-management actions on one task, picked via
   boolean opts: `--install [NAME [TARGET]]`, `--show NAME`,
   `--path NAME`, `--edit NAME`, `--run NAME [ARGS]` (use `--` to
   forward flags through). Bare invocation lists.
-* `:init` - writes `Hammer::STARTER_HAMMERFILE` to `./Hammerfile`;
+* `h:init` - writes `Hammer::STARTER_HAMMERFILE` to `./Hammerfile`;
   refuses if one exists.
 
-Both `:default` and `:help` are invoked via `run_command(cmd, argv,
-full: name, quiet: true)` - the gray `> prog cmd ...` banner is
-suppressed because the user didn't type `hammer default` /
-`hammer help` literally.
+The `:default` task and the `help` / `-h` / `--help` requests are
+invoked via `run_command(cmd, argv, full: name, quiet: true)` - the
+gray `> prog cmd ...` banner is suppressed because the user didn't type
+`hammer default` / `hammer h:help` literally.
 * Commands listed flat with colon paths, grouped by top-level namespace.
 * Bare namespace (`hammer db`) prints the same listing scoped to that
   namespace.

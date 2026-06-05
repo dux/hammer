@@ -27,56 +27,48 @@ class BuiltinsTest < Minitest::Test
     refute Hammer.dispatches_to_builtin?(['db:migrate'])
   end
 
-  def test_looks_like_builtin_for_builtin_task_names
-    assert Hammer.looks_like_builtin?(['recipes'])
-    assert Hammer.looks_like_builtin?(['update'])
-    assert Hammer.looks_like_builtin?(['agents'])
-    assert Hammer.looks_like_builtin?(['version'])
-    assert Hammer.looks_like_builtin?(['init'])
+  def test_looks_like_builtin_for_h_namespace
+    assert Hammer.looks_like_builtin?(['h'])
+    assert Hammer.looks_like_builtin?(['h:'])
+    assert Hammer.looks_like_builtin?(['h:update'])
+    assert Hammer.looks_like_builtin?(['h:recipes'])
+    refute Hammer.looks_like_builtin?(['update'])  # old root name is gone
     refute Hammer.looks_like_builtin?(['build'])
     refute Hammer.looks_like_builtin?([])
   end
 
-  # ----- register_core ----------------------------------------------
+  # ----- register ----------------------------------------------------
 
-  def test_register_core_adds_all_core_tasks
+  def test_register_adds_default_at_root_and_builtins_under_h
     klass = Class.new(Hammer)
-    Hammer::Builtins.register_core(klass)
-    %w[default help update agents version].each do |name|
-      assert klass.commands.key?(name), "missing :#{name} after register_core"
+    Hammer::Builtins.register(klass)
+    assert klass.commands.key?('default'), 'missing root :default'
+    h = klass.namespaces['h']
+    refute_nil h, 'missing :h namespace'
+    %w[help update agents version recipes init].each do |name|
+      assert h.commands.key?(name), "missing h:#{name} after register"
     end
   end
 
-  def test_register_core_skips_when_user_defined
+  def test_register_skips_when_user_defined
     klass = Class.new(Hammer) do
       task :default do
         proc { |_| say 'mine' }
       end
-      task :help do
-        desc 'my help'
-        proc { |_| say 'my help' }
-      end
-      task :update do
-        desc 'my update'
-        proc { |_| say 'my update' }
+      namespace :h do
+        task :update do
+          desc 'my update'
+          proc { |_| say 'my update' }
+        end
       end
     end
-    Hammer::Builtins.register_core(klass)
-    assert_equal 'my help', klass.commands['help'].desc
-    assert_equal 'my update', klass.commands['update'].desc
+    Hammer::Builtins.register(klass)
+    assert_equal 'my update', klass.namespaces['h'].commands['update'].desc
   end
 
-  def test_register_no_project_adds_recipes_and_init
-    klass = Class.new(Hammer)
-    Hammer::Builtins.register_no_project(klass)
-    assert klass.commands.key?('recipes')
-    assert klass.commands.key?('init')
-  end
-
-  # ----- self: namespace is no longer reserved ----------------------
+  # ----- :h is the reserved built-in namespace; :self is free --------
 
   def test_user_can_define_self_namespace
-    # The reserved guard is gone - users can use :self freely.
     klass = Class.new(Hammer) do
       namespace :self do
         task :foo do
@@ -92,7 +84,7 @@ class BuiltinsTest < Minitest::Test
 
   def test_recipes_lists_when_no_action_flag
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['--system', 'recipes']) }
+      out, = capture { Hammer.cli(['--system', 'h:recipes']) }
       # srt is bundled with the gem so the listing must mention it.
       assert_includes out, 'srt'
     end
@@ -100,7 +92,7 @@ class BuiltinsTest < Minitest::Test
 
   def test_recipes_install_prints_stub
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['--system', 'recipes', '--install', 'srt']) }
+      out, = capture { Hammer.cli(['--system', 'h:recipes', '--install', 'srt']) }
       assert_includes out, "Hammer.recipe('srt', ARGV)"
       assert_includes out, '#!/usr/bin/env ruby'
     end
@@ -110,7 +102,7 @@ class BuiltinsTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target = File.join(dir, 'srt')
       with_hammerfile("task :x do; proc { |_| }; end\n") do
-        out, = capture { Hammer.cli(['--system', 'recipes', '--install', 'srt', target]) }
+        out, = capture { Hammer.cli(['--system', 'h:recipes', '--install', 'srt', target]) }
         assert_includes out, "installed srt -> #{target}"
       end
       assert File.exist?(target)
@@ -126,7 +118,7 @@ class BuiltinsTest < Minitest::Test
       orig_home = ENV['HOME']
       ENV['HOME'] = home
       with_hammerfile("task :x do; proc { |_| }; end\n") do
-        capture { Hammer.cli(['--system', 'recipes', '--install', 'srt', '~/bin/srt']) }
+        capture { Hammer.cli(['--system', 'h:recipes', '--install', 'srt', '~/bin/srt']) }
       end
       assert File.exist?(File.join(bin, 'srt'))
     ensure
@@ -136,14 +128,14 @@ class BuiltinsTest < Minitest::Test
 
   def test_recipes_path_prints_path
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['--system', 'recipes', '--path', 'srt']) }
+      out, = capture { Hammer.cli(['--system', 'h:recipes', '--path', 'srt']) }
       assert_includes out, 'recipes/srt.rb'
     end
   end
 
   def test_recipes_show_cats_source
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['--system', 'recipes', '--show', 'srt']) }
+      out, = capture { Hammer.cli(['--system', 'h:recipes', '--show', 'srt']) }
       assert_includes out, '# desc:'
       assert_includes out, 'task :'
     end
@@ -151,7 +143,7 @@ class BuiltinsTest < Minitest::Test
 
   def test_recipes_show_without_name_errors
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      _, err, status = capture_exit { Hammer.cli(['--system', 'recipes', '--show']) }
+      _, err, status = capture_exit { Hammer.cli(['--system', 'h:recipes', '--show']) }
       assert_equal 1, status
       assert_includes err, 'missing recipe name'
     end
@@ -168,7 +160,7 @@ class BuiltinsTest < Minitest::Test
       RUBY
       ENV['HAMMER_RECIPES_DIR'] = dir
       with_hammerfile("task :x do; proc { |_| }; end\n") do
-        out, = capture { Hammer.cli(['--system', 'recipes', '--run', 'echo', 'hi']) }
+        out, = capture { Hammer.cli(['--system', 'h:recipes', '--run', 'echo', 'hi']) }
         assert_includes out, 'reached the recipe'
       end
     ensure
@@ -178,28 +170,25 @@ class BuiltinsTest < Minitest::Test
 
   def test_recipes_run_without_name_errors
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      _, err, status = capture_exit { Hammer.cli(['--system', 'recipes', '--run']) }
+      _, err, status = capture_exit { Hammer.cli(['--system', 'h:recipes', '--run']) }
       assert_equal 1, status
       assert_includes err, 'missing recipe name'
     end
   end
 
-  # ----- --system flag ----------------------------------------------
+  # ----- h: built-ins inside a project ------------------------------
 
-  def test_system_flag_reaches_recipes_inside_a_project
-    # With a Hammerfile present, `hammer recipes` would normally dispatch
-    # to a user-defined task (here :x exists, :recipes does not, so it'd
-    # error). `--system` bypasses the Hammerfile entirely so the built-in
-    # is reachable.
+  def test_h_recipes_reachable_inside_a_project
+    # The built-ins live under `h:`, so they're reachable inside a
+    # project without `--system` and never collide with root tasks.
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['--system', 'recipes']) }
+      out, = capture { Hammer.cli(['h:recipes']) }
       assert_includes out, 'srt'
     end
   end
 
-  def test_recipes_not_registered_when_hammerfile_present
-    # Without --system, the :recipes built-in is NOT registered when a
-    # Hammerfile is present - keeps the user's root namespace clean.
+  def test_old_root_names_are_gone
+    # Hard switch: the pre-namespace root names no longer resolve.
     with_hammerfile("task :x do; proc { |_| }; end\n") do
       _, err, status = capture_exit { Hammer.cli(['recipes']) }
       assert_equal 1, status
@@ -207,7 +196,7 @@ class BuiltinsTest < Minitest::Test
     end
   end
 
-  def test_init_not_registered_when_hammerfile_present
+  def test_old_init_root_name_is_gone
     with_hammerfile("task :x do; proc { |_| }; end\n") do
       _, err, status = capture_exit { Hammer.cli(['init']) }
       assert_equal 1, status
@@ -223,9 +212,9 @@ class BuiltinsTest < Minitest::Test
     Hammer.define_singleton_method(:self_update) { called = true }
 
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      capture { Hammer.cli(['update']) }
+      capture { Hammer.cli(['h:update']) }
     end
-    assert called, '`hammer update` should call Hammer.self_update'
+    assert called, '`hammer h:update` should call Hammer.self_update'
   ensure
     Hammer.define_singleton_method(:self_update) { __orig_self_update }
     Hammer.singleton_class.send(:remove_method, :__orig_self_update) if Hammer.singleton_class.method_defined?(:__orig_self_update)
@@ -272,61 +261,50 @@ class BuiltinsTest < Minitest::Test
     refute_includes out, 'Recipes:'
   end
 
-  # ----- hidden core built-ins (project context) --------------------
+  # ----- h: built-ins in listings -----------------------------------
 
-  def test_register_core_hidden_blanks_core_descs
-    klass = Class.new(Hammer)
-    Hammer::Builtins.register_core(klass, hidden: true)
-    Hammer::Builtins::CORE_HIDEABLE.each do |name|
-      assert klass.commands.key?(name), "missing :#{name} after hidden register_core"
-      assert_empty klass.commands[name].desc, ":#{name} should have a blank desc when hidden"
-    end
-  end
-
-  def test_register_core_without_hidden_keeps_descs
-    klass = Class.new(Hammer)
-    Hammer::Builtins.register_core(klass)
-    refute_empty klass.commands['update'].desc
-    refute_empty klass.commands['version'].desc
-  end
-
-  def test_register_core_hidden_keeps_user_defined_desc
-    # A Hammerfile that redefines :help must keep its own desc - we only
-    # blank the built-ins we just registered.
-    klass = Class.new(Hammer) do
-      task :help do
-        desc 'my help'
-        proc { |_| }
-      end
-    end
-    Hammer::Builtins.register_core(klass, hidden: true)
-    assert_equal 'my help', klass.commands['help'].desc
-  end
-
-  def test_project_listing_hides_core_builtins
+  def test_bare_listing_hides_h_builtins
+    # The bare-invocation listing stays focused on project tasks - the
+    # `h:` built-ins are pruned (but still dispatchable).
     with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
       out, = capture { Hammer.cli([]) }
-      assert_includes out, 'build it'                 # project task shows
-      refute_includes out, 'Rebuild + reinstall'      # :update desc
-      refute_includes out, 'Print lux-hammer version' # :version desc
-      refute_includes out, 'AGENTS.md'                # :agents desc
+      assert_includes out, 'build it'          # project task shows
+      refute_includes out, 'h:update'          # built-ins hidden outside --help
     end
   end
 
-  def test_project_core_builtins_still_dispatch
+  def test_help_listing_shows_h_builtins
     with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['version']) }
+      out, = capture { Hammer.cli(['--help']) }
+      assert_includes out, 'build it'          # project task shows
+      assert_includes out, 'h:update'          # built-ins surface under --help
+      assert_includes out, 'h:version'
+    end
+  end
+
+  def test_project_h_builtins_dispatch
+    with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
+      out, = capture { Hammer.cli(['h:version']) }
       assert_includes out, Hammer::VERSION
     end
   end
 
-  def test_no_hammerfile_listing_keeps_core_builtins
-    # Outside a project the built-ins are the whole CLI - they must stay
-    # visible (hidden: false on the no-Hammerfile branch).
+  def test_h_namespace_listing
+    with_hammerfile("task :build do; desc 'build it'; proc { |_| }; end\n") do
+      out, = capture { Hammer.cli(['h:']) }
+      assert_includes out, 'h:update'
+      assert_includes out, 'h:recipes'
+      refute_includes out, 'build it'          # only the namespace's own tasks
+    end
+  end
+
+  def test_no_hammerfile_help_lists_h_builtins
+    # Outside a project the built-ins are the whole CLI - they surface in
+    # the extended `--help` view (bare invocation stays terse).
     with_no_hammerfile do
-      out, = capture { Hammer.cli([]) }
-      assert_includes out, 'Rebuild + reinstall'      # :update desc
-      assert_includes out, 'Print lux-hammer version' # :version desc
+      out, = capture { Hammer.cli(['--help']) }
+      assert_includes out, 'h:update'
+      assert_includes out, 'h:version'
     end
   end
 end

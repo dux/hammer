@@ -1,49 +1,33 @@
 class Hammer
-  # Built-in tasks of the `hammer` binary - all live at the root level
-  # (no reserved namespace). Two registration entry points:
-  #
-  # * register_core - tasks always available (subject to user override
-  #   via the `unless commands.key?(...)` guard): :default, :help,
-  #   :update, :agents, :version. These coexist with Hammerfile tasks.
-  #   Pass `hidden: true` (the Hammerfile branch does) to keep them
-  #   dispatchable but drop them from the listing - see `hide_core`.
-  #
-  # * register_no_project - tasks meaningful only when no Hammerfile is
-  #   loaded (or `--system` was passed): :recipes, :init. These would
-  #   collide too easily with user tasks if always registered, so the
-  #   Hammerfile branch skips them.
+  # Built-in tasks of the `hammer` binary. Everything but :default lives
+  # under the reserved `h:` namespace (e.g. `hammer h:update`,
+  # `hammer h:recipes`) so the built-ins never collide with a project's
+  # own root tasks. Only the bare `hammer` invocation and the
+  # `-h`/`--help`/`help` request are handled at root - bare fires
+  # :default, which also carries the `--version` convenience flag.
   module Builtins
     module_function
 
-    def register_core(klass, hidden: false)
-      preexisting = klass.commands.keys
-      register_help(klass)    unless klass.commands.key?('help')
+    # Single registration entry point - identical in every context
+    # (project Hammerfile or bare `hammer` binary). Namespacing under
+    # `h:` removes the old collision worries, so there's no core vs
+    # no-project split and no hidden-desc dance: the same tasks register
+    # everywhere, always dispatchable, and surface in the listing only
+    # under the extended `--help` view (the `@builtin_namespace` flag).
+    def register(klass)
       register_default(klass) unless klass.commands.key?('default')
-      register_update(klass)  unless klass.commands.key?('update')
-      register_agents(klass)  unless klass.commands.key?('agents')
-      register_version(klass) unless klass.commands.key?('version')
-      hide_core(klass, preexisting) if hidden
-    end
 
-    # When a Hammerfile owns the task tree, the core built-ins stay
-    # dispatchable but drop out of the listing so only project tasks
-    # show. Empty desc = hidden-but-callable - same convention as
-    # private helper tasks; :default already carries no desc. Only the
-    # built-ins we just registered are hidden: a command the Hammerfile
-    # defined itself (in `preexisting`) keeps its own desc.
-    CORE_HIDEABLE ||= %w[help update agents version].freeze
-
-    def hide_core(klass, preexisting)
-      CORE_HIDEABLE.each do |name|
-        next if preexisting.include?(name)
-        cmd = klass.commands[name]
-        cmd.instance_variable_set(:@desc, '') if cmd
-      end
-    end
-
-    def register_no_project(klass)
-      register_recipes(klass) unless klass.commands.key?('recipes')
-      register_init(klass)    unless klass.commands.key?('init')
+      klass.namespace(:h) {}          # ensure/reopen the reserved subclass
+      h = klass.namespaces['h']
+      # Flag the tree so the compact listing prunes it - the built-ins
+      # only show under the extended `--help` view (always dispatchable).
+      h.instance_variable_set(:@builtin_namespace, true)
+      register_help(h)    unless h.commands.key?('help')
+      register_update(h)  unless h.commands.key?('update')
+      register_agents(h)  unless h.commands.key?('agents')
+      register_version(h) unless h.commands.key?('version')
+      register_recipes(h) unless h.commands.key?('recipes')
+      register_init(h)    unless h.commands.key?('init')
     end
 
     def register_help(klass)
@@ -57,9 +41,9 @@ class Hammer
             per-command help; with a namespace prefix prints that
             namespace's command listing.
           TXT
-          example 'help'
-          example 'help build'
-          example 'help db:'
+          example 'h:help'
+          example 'h:help build'
+          example 'h:help db:'
           proc do |opts|
             self.class.root.print_help(opts[:args].first, extended: true)
           end
@@ -129,7 +113,7 @@ class Hammer
     # invocation lists; opts pick the action and positional args carry
     # the recipe name (and optional target path for --install). Run via
     # `--run NAME [ARGS]` - use `--` to forward flags to the recipe
-    # itself (e.g. `hammer recipes --run srt -- --help`).
+    # itself (e.g. `hammer h:recipes --run srt -- --help`).
     def register_recipes(klass)
       klass.class_eval do
         task :recipes do
@@ -143,12 +127,12 @@ class Hammer
           opt :path,    type: :boolean, desc: 'print recipe abs path'
           opt :edit,    type: :boolean, desc: 'open recipe in $EDITOR (copies gem -> user dir first)'
           opt :run,     type: :boolean, desc: 'run a recipe without installing its bin (forwards remaining args)'
-          example 'recipes'
-          example 'recipes --install srt ~/bin/srt    # write + chmod in one shot'
-          example 'recipes --install srt > ~/bin/srt && chmod +x $_'
-          example 'recipes --show srt'
-          example 'recipes --run srt extract movie.mp4'
-          example 'recipes --run srt -- --help        # -- forwards flags to the recipe'
+          example 'h:recipes'
+          example 'h:recipes --install srt ~/bin/srt    # write + chmod in one shot'
+          example 'h:recipes --install srt > ~/bin/srt && chmod +x $_'
+          example 'h:recipes --show srt'
+          example 'h:recipes --run srt extract movie.mp4'
+          example 'h:recipes --run srt -- --help        # -- forwards flags to the recipe'
           proc do |opts|
             args = opts[:args]
             if opts[:install]
@@ -190,7 +174,7 @@ class Hammer
 
       def require_name!(name, action)
         return name if name
-        Shell.print_error "missing recipe name (usage: recipes --#{action} NAME)"
+        Shell.print_error "missing recipe name (usage: h:recipes --#{action} NAME)"
         exit 1
       end
 
@@ -212,7 +196,7 @@ class Hammer
           Shell.say "#{source}:", :yellow
           items.each_key do |name|
             _n, desc, installed = rows.find { |r| r.first == name }
-            status = installed ? "(installed: #{installed})" : "[install: hammer recipes --install #{name}]"
+            status = installed ? "(installed: #{installed})" : "[install: hammer h:recipes --install #{name}]"
             line = "  #{name.ljust(width)}  # #{desc}"
             Shell.say line
             Shell.say "  #{' ' * width}    #{status}", :gray
@@ -262,7 +246,7 @@ class Hammer
       end
 
       # For a gem recipe, offer to copy to user dir first so edits
-      # survive `hammer update`. Then exec $EDITOR on the file.
+      # survive `hammer h:update`. Then exec $EDITOR on the file.
       def edit(name)
         path = Hammer::Recipe.path(name) or fail_unknown(name)
         editor = ENV['EDITOR'] || ENV['VISUAL']

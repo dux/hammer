@@ -73,7 +73,7 @@ Clones into `~/.local/share/lux-hammer` (override with `LUX_HAMMER_DIR=`),
 builds the gem, and installs it. Re-run any time, or use:
 
 ```sh
-hammer update   # git pull main + rebuild + reinstall
+hammer h:update   # git pull main + rebuild + reinstall
 ```
 
 ## Quick start
@@ -537,40 +537,42 @@ end
 `hammer` and `hammer db` won't list `env`, but `hammer env`,
 `hammer :env` from another proc, and `before { hammer :env }` all work.
 
-## Built-in tasks (all overridable)
+## Built-in tasks
 
-The `hammer` binary auto-registers a small set of built-in tasks at
-the root of your CLI. Each one is guarded by `unless commands.key?` -
-defining your own `task :name` in a Hammerfile silently replaces the
-built-in.
+The `hammer` binary auto-registers a small set of built-in tasks. All
+the tool-meta commands live under the reserved `h:` namespace so they
+can never collide with your project's own root tasks. They register the
+same way with or without a Hammerfile and are always dispatchable, but
+to keep the bare listing focused on your project they only show up
+(under an `h:` section) in the extended `hammer --help` view.
 
-Always available (with or without a Hammerfile):
+Handled at the root (so the conventional invocations keep working):
 
 * `:default` - fires on bare `hammer` and on leading-flag invocations.
-  Hidden from listings. Just prints the brief help by default; override
-  to wire up your own global flags.
-* `:help` - `hammer help [TARGET]`, `hammer -h`, `hammer --help`. Prints
-  the extended help view; `TARGET` accepts a command path or a `ns:`
-  prefix.
-* `:update` - rebuild + reinstall lux-hammer from main.
-* `:agents` - dump AGENTS.md (AI-friendly Hammerfile authoring docs).
-* `:version` - print the lux-hammer version.
+  Hidden from listings. Prints the brief help by default and carries a
+  `--version` / `-v` flag; override to wire up your own global flags.
+* `hammer help [TARGET]`, `hammer -h`, `hammer --help` - prints the
+  extended help view; `TARGET` accepts a command path or a `ns:` prefix.
+  (Also available as `hammer h:help`.)
 
-Only when no Hammerfile is loaded (or `--system` is passed - see below):
+Under the `h:` namespace:
 
-* `:recipes` - list / install / show / edit recipes.
-* `:init` - write a starter Hammerfile in cwd (refuses if one exists).
+* `h:update` - rebuild + reinstall lux-hammer from main.
+* `h:agents` - dump AGENTS.md (AI-friendly Hammerfile authoring docs).
+* `h:version` - print the lux-hammer version.
+* `h:recipes` - list / install / show / edit recipes.
+* `h:init` - write a starter Hammerfile in cwd (refuses if one exists).
 
-These two are skipped inside a project so they don't shadow user tasks.
-To reach them from inside a project, pass `--system`:
-
-```sh
-hammer --system recipes              # list recipes from anywhere
-hammer --system recipes --install srt ~/bin/srt
-```
+Each is guarded by `unless commands.key?` within the namespace, so you
+can override one by reopening `namespace :h` in your Hammerfile.
 
 `--system` forces the no-Hammerfile branch - the Hammerfile in the
-current tree (if any) isn't loaded for that invocation.
+current tree (if any) isn't loaded for that invocation:
+
+```sh
+hammer --system h:recipes              # list recipes, ignoring any local Hammerfile
+hammer --system h:recipes --install srt ~/bin/srt
+```
 
 Customize bare `hammer` by replacing `:default`:
 
@@ -1106,20 +1108,21 @@ A **recipe** is a standalone Hammerfile-style script bundled inside the
 top-level binary in your `PATH` - so `srt` becomes a real command, not
 `hammer srt:shift`.
 
-Recipe management lives under the `recipes` task. From inside a
-project the task isn't registered (so it can't shadow user tasks);
-pass `--system` to reach it from anywhere.
+Recipe management lives under the `h:recipes` task, reachable from
+anywhere (inside a project the `h:` namespace can't shadow your root
+tasks). `--system` skips loading a local Hammerfile if you want a clean
+environment.
 
 Listing what's available:
 
 ```sh
-$ hammer recipes                    # from any non-project dir
-$ hammer --system recipes           # from inside a project
+$ hammer h:recipes                    # from any directory
+$ hammer --system h:recipes           # ignoring any local Hammerfile
 gem:
   srt  # Subtitle (.srt) toolkit - shift timestamps, show stats
-         [install: hammer recipes --install srt]
+         [install: hammer h:recipes --install srt]
   llm  # personal LLM utility CLI (memory store, prompt-token expander, ...)
-         [install: hammer recipes --install llm]
+         [install: hammer h:recipes --install llm]
 ```
 
 Installing one. With no TARGET, the stub is printed to stdout (you
@@ -1127,8 +1130,8 @@ redirect it yourself); with a TARGET path, lux-hammer writes the file
 and chmods +x in one step:
 
 ```sh
-$ hammer recipes --install srt ~/bin/srt    # write + chmod
-$ hammer recipes --install srt > ~/bin/srt && chmod +x ~/bin/srt
+$ hammer h:recipes --install srt ~/bin/srt    # write + chmod
+$ hammer h:recipes --install srt > ~/bin/srt && chmod +x ~/bin/srt
 $ srt --help
 Usage: srt COMMAND [ARGS]
 
@@ -1145,7 +1148,7 @@ so the recipe always runs the version currently in the gem.
 ### Authoring your own
 
 Drop a plain `.rb` file in `~/.config/hammer/recipes/`. The first
-`# desc: ...` comment is what shows in `hammer recipes`. The file body
+`# desc: ...` comment is what shows in `hammer h:recipes`. The file body
 uses the same DSL as a Hammerfile - `task`, `namespace`, `before`,
 `load`. Example `~/.config/hammer/recipes/json.rb`:
 
@@ -1165,22 +1168,22 @@ end
 Install it the same way:
 
 ```sh
-$ hammer recipes --install json ~/bin/json
+$ hammer h:recipes --install json ~/bin/json
 ```
 
 User-dir recipes override gem recipes with the same name, so you can
 fork without forking.
 
-### Other `recipes` actions
+### Other `h:recipes` actions
 
 ```sh
-hammer recipes                            # list all
-hammer recipes --install                  # interactive picker, then prints stub
-hammer recipes --show NAME                # cat the recipe source
-hammer recipes --path NAME                # absolute path
-hammer recipes --edit NAME                # open in $EDITOR (copies gem -> user dir first)
-hammer recipes --run  NAME [ARGS]         # run without installing its bin
-hammer recipes --run  NAME -- --help      # `--` forwards flags to the recipe
+hammer h:recipes                            # list all
+hammer h:recipes --install                  # interactive picker, then prints stub
+hammer h:recipes --show NAME                # cat the recipe source
+hammer h:recipes --path NAME                # absolute path
+hammer h:recipes --edit NAME                # open in $EDITOR (copies gem -> user dir first)
+hammer h:recipes --run  NAME [ARGS]         # run without installing its bin
+hammer h:recipes --run  NAME -- --help      # `--` forwards flags to the recipe
 ```
 
 ## Programmatic use

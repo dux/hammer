@@ -80,7 +80,7 @@ class CliTest < Minitest::Test
   def test_agents_task_dumps_agents_md
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
-        out, = capture { Hammer.cli(['agents']) }
+        out, = capture { Hammer.cli(['h:agents']) }
         assert_includes out, 'AGENTS.md - lux-hammer'
         assert_includes out, 'DSL surface'
       end
@@ -93,7 +93,7 @@ class CliTest < Minitest::Test
         proc { |_| say 'HANDLER_FIRED_UNIQUE_MARKER' }
       end
     RUBY
-      out, = capture { Hammer.cli(['agents']) }
+      out, = capture { Hammer.cli(['h:agents']) }
       assert_includes out, 'AGENTS.md - lux-hammer'
       refute_includes out, 'HANDLER_FIRED_UNIQUE_MARKER'
     end
@@ -103,7 +103,7 @@ class CliTest < Minitest::Test
 
   def test_version_task_prints_version
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      out, = capture { Hammer.cli(['version']) }
+      out, = capture { Hammer.cli(['h:version']) }
       assert_includes out, Hammer::VERSION
     end
   end
@@ -111,7 +111,7 @@ class CliTest < Minitest::Test
   def test_version_task_works_without_hammerfile
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
-        out, = capture { Hammer.cli(['version']) }
+        out, = capture { Hammer.cli(['h:version']) }
         assert_includes out, Hammer::VERSION
       end
     end
@@ -120,7 +120,7 @@ class CliTest < Minitest::Test
   def test_init_writes_starter_hammerfile
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
-        out, = capture { Hammer.cli(['init']) }
+        out, = capture { Hammer.cli(['h:init']) }
         assert_includes out, 'created'
         target = File.join(dir, 'Hammerfile')
         assert File.exist?(target)
@@ -144,11 +144,10 @@ class CliTest < Minitest::Test
   end
 
   def test_init_refuses_when_hammerfile_exists
-    # `init` is no-Hammerfile only - inside a project it's not registered
-    # at all, so the dispatch fails before write_starter_hammerfile runs.
-    # Reach it via --system to exercise the file-exists guard.
+    # `h:init` refuses to clobber an existing Hammerfile. Reach it via
+    # --system so the lookup doesn't chdir into the project first.
     with_hammerfile("task :x do; proc { |_| }; end\n") do
-      _, err, status = capture_exit { Hammer.cli(['--system', 'init']) }
+      _, err, status = capture_exit { Hammer.cli(['--system', 'h:init']) }
       assert_equal 1, status
       assert_includes err, 'Hammerfile already exists'
     end

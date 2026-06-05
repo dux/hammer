@@ -554,15 +554,20 @@ class Hammer
     end
 
     # Yield [full_colon_path, Command] for every command in this class
-    # and all nested namespaces.
-    def each_command(prefix = nil, &block)
+    # and all nested namespaces. `include_builtins: false` prunes
+    # namespaces flagged `@builtin_namespace` (the reserved `h:` tree) -
+    # used so the compact listing hides built-ins outside `--help`. Only
+    # affects descent from a parent; iterating a flagged namespace
+    # directly (e.g. `hammer h:`) still lists its own commands.
+    def each_command(prefix = nil, include_builtins: true, &block)
       commands.each_value do |c|
         full = prefix ? "#{prefix}:#{c.name}" : c.name
         yield full, c
       end
       namespaces.each do |ns_name, sub|
+        next if !include_builtins && sub.instance_variable_get(:@builtin_namespace)
         sub_prefix = prefix ? "#{prefix}:#{ns_name}" : ns_name
-        sub.each_command(sub_prefix, &block)
+        sub.each_command(sub_prefix, include_builtins: include_builtins, &block)
       end
     end
 
@@ -665,11 +670,15 @@ class Hammer
         Shell.say ''
         @app_desc.each_line { |l| Shell.say "  #{l.chomp}" }
       end
+      # Built-in `h:` commands only surface in the extended view
+      # (`--help` / `-h` / `help`); the bare-invocation listing stays
+      # focused on the project's own tasks. They remain dispatchable
+      # regardless - this only governs what the listing shows.
       if expanded
-        each_command { |path, c| print_full_block(path, c) unless c.desc.empty? }
+        each_command(include_builtins: extended) { |path, c| print_full_block(path, c) unless c.desc.empty? }
       else
         Shell.say ''
-        print_command_list(self)
+        print_command_list(self, include_builtins: extended)
       end
       print_recipes_section if extended && root.instance_variable_get(:@hammer_binary)
       print_extras if extended
@@ -688,7 +697,7 @@ class Hammer
       entries.each do |name, file|
         desc = Hammer::Recipe.desc(file)
         installed = Hammer::Recipe.installed_path(name)
-        suffix = installed ? "(installed: #{installed})" : "[install: #{program_name} recipes --install #{name}]"
+        suffix = installed ? "(installed: #{installed})" : "[install: #{program_name} h:recipes --install #{name}]"
         Shell.say "  #{name.ljust(width)}  # #{desc}"
         Shell.say "  #{' ' * width}    #{suffix}", :gray
       end
@@ -761,19 +770,19 @@ class Hammer
 
     # Hammerfile cheat-sheet shown under `hammer --help`. Same content
     # as `hammer --init` writes - single source of truth via
-    # `Hammer::STARTER_HAMMERFILE`. For exhaustive docs see `hammer agents`.
+    # `Hammer::STARTER_HAMMERFILE`. For exhaustive docs see `hammer h:agents`.
     def print_hammerfile_example
       Shell.say ''
       Shell.say 'Hammerfile example:', :yellow
       Shell.say Hammer::STARTER_HAMMERFILE
     end
 
-    def print_command_list(klass, prefix = nil)
+    def print_command_list(klass, prefix = nil, include_builtins: true)
       rows = []
       # Commands without a `desc` are hidden from listings but still
       # dispatchable + `hammer`-callable - useful for private helpers
       # invoked from `before` hooks or other commands (e.g. `:env`, `:app`).
-      klass.each_command(prefix) { |full, c| rows << [full, c] unless c.desc.empty? }
+      klass.each_command(prefix, include_builtins: include_builtins) { |full, c| rows << [full, c] unless c.desc.empty? }
       return if rows.empty?
 
       # group by "section" = everything between the view prefix and the
@@ -911,7 +920,7 @@ class Hammer
       Shell.print_error "unknown recipe: #{name}"
       Shell.say 'available recipes:', :yellow
       Recipe.all.keys.sort.each { |n| Shell.say "  #{n}" }
-      Shell.say 'try `hammer recipes` to list with descriptions', :gray
+      Shell.say 'try `hammer h:recipes` to list with descriptions', :gray
       exit 1
     end
 
@@ -967,12 +976,12 @@ class Hammer
     end
   RUBY
 
-  # Default install dir used by install.sh and `hammer update`.
+  # Default install dir used by install.sh and `hammer h:update`.
   SELF_UPDATE_DIR  ||= File.expand_path('~/.local/share/lux-hammer')
   SELF_UPDATE_REPO ||= 'https://github.com/dux/hammer.git'
   SELF_INSTALL_URL ||= 'https://raw.githubusercontent.com/dux/hammer/main/install.sh'
 
-  # `hammer update`: pull main in the install-script checkout and
+  # `hammer h:update`: pull main in the install-script checkout and
   # reinstall the gem. Assumes the install.sh layout - if the dir is
   # missing, point the user at the curl-pipe installer.
   def self.self_update
@@ -1028,15 +1037,14 @@ class Hammer
     path = force_system ? nil : find_hammerfile(Dir.pwd)
     unless path
       # No Hammerfile (or --system) - all built-ins are reachable. Bare
-      # `hammer`, `hammer recipes`, `hammer update`, `hammer agents`,
-      # `hammer version`, `hammer init` all work.
+      # `hammer`, `hammer h:recipes`, `hammer h:update`, `hammer h:agents`,
+      # `hammer h:version`, `hammer h:init` all work.
       if force_system || dispatches_to_builtin?(argv) || looks_like_builtin?(argv)
         klass = Class.new(Hammer)
         klass.instance_variable_set(:@hammer_binary, true)
         klass.program_name
         require_relative 'hammer/builtins'
-        Hammer::Builtins.register_core(klass)
-        Hammer::Builtins.register_no_project(klass)
+        Hammer::Builtins.register(klass)
         klass.start(argv)
         return
       end
@@ -1060,8 +1068,8 @@ class Hammer
       Shell.say STARTER_HAMMERFILE
       Shell.say ''
       bin = File.basename($PROGRAM_NAME)
-      Shell.say "tip: run `#{bin} init` to drop the example above into ./Hammerfile", :gray
-      Shell.say "tip: run `#{bin} agents` for AI-friendly Hammerfile authoring docs", :gray
+      Shell.say "tip: run `#{bin} h:init` to drop the example above into ./Hammerfile", :gray
+      Shell.say "tip: run `#{bin} h:agents` for AI-friendly Hammerfile authoring docs", :gray
       exit 1
     end
 
@@ -1082,16 +1090,13 @@ class Hammer
     # are NOT visible during Hammerfile evaluation, only inside handlers.
     Hammer::Dotenv.load(Dir.pwd) if klass.dotenv_enabled?
 
-    # Core built-ins register AFTER Hammerfile eval so user-defined
-    # tasks win (the `unless commands.key?(...)` guards in register_core
-    # skip the built-in when overridden - no redefinition warning).
-    # `hidden: true` keeps them dispatchable but drops them from the
-    # command listing so a project shows only its own tasks.
-    # `register_no_project` (:recipes, :init) is intentionally NOT
-    # called here - those would clash too easily with user tasks. Use
-    # `hammer --system recipes` to reach them from inside a project.
+    # Built-ins register AFTER Hammerfile eval so user-defined tasks win
+    # (the `unless commands.key?(...)` guards skip a built-in when the
+    # Hammerfile already owns the name - no redefinition warning). All
+    # built-ins live under `h:`, so they can't collide with project root
+    # tasks and the full set registers in every context.
     require_relative 'hammer/builtins'
-    Hammer::Builtins.register_core(klass, hidden: true)
+    Hammer::Builtins.register(klass)
 
     klass.start(argv)
   end
@@ -1111,7 +1116,7 @@ class Hammer
   end
 
   # Evaluate a shebang script as a self-contained CLI. Mirrors `recipe`
-  # semantics: no chdir, no `@hammer_binary` flag, no `register_core`
+  # semantics: no chdir, no `@hammer_binary` flag, no `Builtins.register`
   # built-ins (so the script's `--help` shows only what it defines).
   # `program_name` is the script's basename so help reads "myscript foo"
   # rather than "hammer foo" - works even when invoked via a symlink in
@@ -1133,15 +1138,14 @@ class Hammer
     first == 'help' || first == '-h' || first == '--help' || first.start_with?('-')
   end
 
-  # True if argv names a built-in task (`recipes`, `update`, `agents`,
-  # `version`, `init`). Used in the no-Hammerfile branch to wake up the
-  # built-ins for invocations like `hammer recipes` that aren't a flag
+  # True if argv targets the reserved `h:` built-in namespace (`h`, `h:`,
+  # `h:update`, ...). Used in the no-Hammerfile branch to wake up the
+  # built-ins for invocations like `hammer h:recipes` that aren't a flag
   # or help request.
-  BUILTIN_TASKS ||= %w[recipes update agents version init].freeze
   def self.looks_like_builtin?(argv)
     first = argv.first
     return false unless first
-    BUILTIN_TASKS.include?(first) || BUILTIN_TASKS.any? { |t| first.start_with?("#{t}:") }
+    first == 'h' || first.start_with?('h:')
   end
 
   # Walk up the directory tree looking for a Hammerfile.

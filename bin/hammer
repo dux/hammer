@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+# Prefer the adjacent lib/ when this script lives in a repo checkout
+# (lib/lux-hammer.rb sits next to bin/), otherwise fall back to the
+# installed gem. Otherwise an installed older gem shadows local edits.
+local_lib = File.expand_path('../lib/lux-hammer.rb', __dir__)
+if File.file?(local_lib)
+  $LOAD_PATH.unshift File.dirname(local_lib)
+end
+
+# Auto-activate Bundler when invoked inside a Bundler-managed project so
+# Hammerfile + lib/tasks/*_hammer.rb get framework code (e.g. lux-fw's
+# Dir.require_all, Hash#to_lux_hash) without users needing `bundle exec`.
+# Bundler.require loads default-group gems (matches Rails-style boot).
+# No-op (rescued) when Bundler isn't available or no Gemfile present.
+if File.exist?('Gemfile') && !defined?(Bundler)
+  begin
+    require 'bundler/setup'
+    require 'bundler'
+    Bundler.require(:default)
+  rescue LoadError, StandardError
+    # bundler missing or Gemfile unusable - run without activation
+  end
+end
+
+require 'lux-hammer'
+Hammer.cli(ARGV)
+

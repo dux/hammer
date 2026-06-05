@@ -49,14 +49,14 @@ class Hammer
       ''
     end
 
-    # Ruby wrapper text printed by `hammer recipes --install`. User
+    # Ruby wrapper text printed by `hammer h:recipes --install`. User
     # redirects it to a file in PATH and chmods +x. The leading comment
     # documents the canonical install command. Name is passed as a
     # string literal so hyphenated names (`git-helper`) work too.
     def stub(name)
       <<~RUBY
         #!/usr/bin/env ruby
-        # install: hammer recipes --install #{name} > ~/bin/#{name} && chmod +x $_
+        # install: hammer h:recipes --install #{name} > ~/bin/#{name} && chmod +x $_
         require 'lux-hammer'
         Hammer.recipe('#{name}', ARGV)
       RUBY
