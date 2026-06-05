@@ -59,6 +59,8 @@ class Hammer
       when :array   then value.is_a?(Array) ? value : value.to_s.split(',')
       else value.to_s
       end
+    rescue ArgumentError, TypeError
+      raise Hammer::Parser::Error, "invalid #{type} value for --#{name}: #{value.inspect}"
     end
 
     def usage

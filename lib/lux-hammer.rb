@@ -94,8 +94,8 @@ class Hammer
       # If the method takes no args, call it without opts. Otherwise pass
       # opts. So both `def build` and `def build(opts)` work.
       m = method_name
-      arity = instance_method(method_name).arity
-      cmd.handler = arity.zero? ? proc { send(m) } : proc { |opts| send(m, opts) }
+      takes_arg = instance_method(method_name).parameters.any? { |type, _| %i[req opt rest].include?(type) }
+      cmd.handler = takes_arg ? proc { |opts| send(m, opts) } : proc { send(m) }
       cmd.finalize!
       commands[cmd.name] = cmd
 
@@ -413,6 +413,13 @@ class Hammer
         return print_help
       end
 
+      # An exact namespace beats a fuzzy command match, so `hammer h` lists
+      # the `h:` namespace instead of prefix-matching some `h...` command.
+      if !commands.key?(name) && namespaces.key?(name)
+        ns, canonical = resolve_namespace(name)
+        return print_namespace_help(canonical, ns)
+      end
+
       cmd, owner, canonical = resolve(name)
       return owner.run_command(cmd, argv, full: canonical) if cmd
 
@@ -518,6 +525,7 @@ class Hammer
     # Tries prefix match first, then substring; raises AmbiguousMatch
     # when either pass hits more than one item.
     def fuzzy_pick(name, items, kind, &keys_for)
+      return nil if name.empty?
       [:start_with?, :include?].each do |op|
         matches = items.select { |item| keys_for.call(item).any? { |k| k.send(op, name) } }
         next if matches.empty?
@@ -548,7 +556,11 @@ class Hammer
       opts.each do |k, v|
         next if v == false
         flag = "--#{k.to_s.tr('_', '-')}"
-        argv << (v == true ? flag : "#{flag}=#{v}")
+        if v == true
+          argv << flag
+        else
+          argv << "#{flag}=#{v.is_a?(Array) ? v.join(',') : v}"
+        end
       end
       start(argv)
     end
@@ -606,7 +618,7 @@ class Hammer
         if o.boolean?
           parts << (val ? "--#{o.name}" : "--no-#{o.name}")
         else
-          parts << "--#{o.name}=#{val}"
+          parts << "--#{o.name}=#{val.is_a?(Array) ? val.join(',') : val}"
         end
       end
       parts.concat(positional)
@@ -617,6 +629,9 @@ class Hammer
     # Each class's hooks fire at most once per top-level `start`, so
     # prereqs dispatched via `needs` won't re-trigger them.
     def run_before_hooks(instance, opts)
+      # Built-in `h:` meta-commands parent to the project root but must not
+      # trigger the project's own `before` hooks (dotenv, env checks, ...).
+      return if instance_variable_get(:@builtin_namespace)
       ran = Thread.current[:hammer_before_ran] ||= {}
       ancestor_chain.each do |klass|
         next if ran[klass.object_id]
@@ -666,6 +681,16 @@ class Hammer
 
       print_top_banner
       Shell.say "Usage: #{program_name} COMMAND [ARGS]", :cyan
+      # Compact (bare-invocation) view only - the extended `--help` view
+      # already IS the full usage, so don't nag about it there.
+      unless extended
+        Shell.say "add `--help` to show usage help", :gray
+        # No project Hammerfile + no custom tasks loaded: point the user at
+        # `h:init`. The flag is set by `Hammer.cli` when the lookup misses.
+        if instance_variable_get(:@no_hammerfile)
+          Shell.say "no Hammerfile found in #{Dir.pwd} - run `#{program_name} h:init` to create one", :gray
+        end
+      end
       if @app_desc && !@app_desc.empty?
         Shell.say ''
         @app_desc.each_line { |l| Shell.say "  #{l.chomp}" }
@@ -1042,6 +1067,9 @@ class Hammer
       if force_system || dispatches_to_builtin?(argv) || looks_like_builtin?(argv)
         klass = Class.new(Hammer)
         klass.instance_variable_set(:@hammer_binary, true)
+        # No project Hammerfile was found - only built-ins are loaded. The
+        # bare-invocation help uses this to note that no Hammerfile exists.
+        klass.instance_variable_set(:@no_hammerfile, true)
         klass.program_name
         require_relative 'hammer/builtins'
         Hammer::Builtins.register(klass)

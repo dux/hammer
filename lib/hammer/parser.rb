@@ -8,9 +8,9 @@ class Hammer
       @options    = options
       @by_switch  = {}
       options.each do |opt|
-        @by_switch[opt.switch] = opt
-        @by_switch[opt.negation] = opt if opt.boolean?
-        opt.aliases.each { |a| @by_switch[a] = opt }
+        register_switch(opt.switch, opt)
+        register_switch(opt.negation, opt) if opt.boolean?
+        opt.aliases.each { |a| register_switch(a, opt) }
       end
     end
 
@@ -31,7 +31,11 @@ class Hammer
         if token.start_with?('--') && token.include?('=')
           key, val = token.split('=', 2)
           opt = lookup!(key)
-          values[opt.name] = opt.cast(val)
+          if opt.boolean? && key.start_with?('--no-')
+            values[opt.name] = !opt.cast(val)   # `--no-x=false` -> true
+          else
+            values[opt.name] = opt.cast(val)
+          end
           i += 1
           next
         end
@@ -50,7 +54,18 @@ class Hammer
           next
         end
 
-        if token.start_with?('-') && token.length > 1
+        # Glued short flag with value: `-pVALUE` (non-boolean short opts only).
+        if token.start_with?('-') && !token.start_with?('--') && token.length > 2
+          if (opt = @by_switch[token[0, 2]]) && !opt.boolean?
+            values[opt.name] = opt.cast(token[2..])
+            i += 1
+            next
+          end
+        end
+
+        # Dash-led and not a negative number -> a genuinely unknown flag.
+        # Bare `-` and negative numbers (`-5`) fall through to positionals.
+        if token.start_with?('-') && token.length > 1 && token !~ /\A-\d/
           raise Error, "unknown option: #{token}"
         end
 
@@ -59,15 +74,21 @@ class Hammer
       end
 
       # Fill un-set non-boolean opts from positional args in declaration
-      # order. Booleans always need an explicit flag.
+      # order. Booleans always need an explicit flag. Scalars take one
+      # positional each; an :array opt slurps whatever's left, so it's
+      # filled last and never starves a later-declared scalar opt.
+      array_opt = nil
       @options.each do |opt|
-        break if positional.empty?
         next if opt.boolean? || values.key?(opt.name)
         if opt.type == :array
-          values[opt.name] = opt.cast(positional.shift(positional.size))
-        else
-          values[opt.name] = opt.cast(positional.shift)
+          array_opt = opt
+          next
         end
+        break if positional.empty?
+        values[opt.name] = opt.cast(positional.shift)
+      end
+      if array_opt && !positional.empty?
+        values[array_opt.name] = array_opt.cast(positional.shift(positional.size))
       end
 
       @options.each do |opt|
@@ -79,6 +100,15 @@ class Hammer
     end
 
     private
+
+    # Map a flag string to its option, refusing silent shadowing when two
+    # options would claim the same switch/negation/alias.
+    def register_switch(flag, opt)
+      if (prev = @by_switch[flag]) && prev != opt
+        raise Error, "flag #{flag} claimed by both :#{prev.name} and :#{opt.name}"
+      end
+      @by_switch[flag] = opt
+    end
 
     def lookup!(key)
       @by_switch[key] or raise Error, "unknown option: #{key}"

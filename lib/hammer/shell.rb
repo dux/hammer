@@ -13,8 +13,11 @@ class Hammer
     module_function
 
     def color?
-      return @color if defined?(@color)
-      @color = $stdout.tty? && ENV['NO_COLOR'].nil?
+      # Only an explicit color!(value) override is sticky; otherwise the
+      # tty decision is recomputed so a redirected $stdout (tests, capture
+      # blocks) is honored instead of frozen at first read.
+      return @color if defined?(@color) && !@color.nil?
+      $stdout.tty? && ENV['NO_COLOR'].nil?
     end
 
     def color!(value)

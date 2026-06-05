@@ -17,11 +17,14 @@ class Hammer
     def register(klass)
       register_default(klass) unless klass.commands.key?('default')
 
+      existed = klass.namespaces.key?('h')
       klass.namespace(:h) {}          # ensure/reopen the reserved subclass
       h = klass.namespaces['h']
       # Flag the tree so the compact listing prunes it - the built-ins
       # only show under the extended `--help` view (always dispatchable).
-      h.instance_variable_set(:@builtin_namespace, true)
+      # Skip when the user already owns an `h:` namespace, so their own
+      # tasks stay visible in the bare listing.
+      h.instance_variable_set(:@builtin_namespace, true) unless existed
       register_help(h)    unless h.commands.key?('help')
       register_update(h)  unless h.commands.key?('update')
       register_agents(h)  unless h.commands.key?('agents')

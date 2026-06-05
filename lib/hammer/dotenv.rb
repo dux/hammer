@@ -38,8 +38,9 @@ class Hammer
         key = key.strip
         next if key.empty?
         val = val.strip
-        if (val.start_with?('"') && val.end_with?('"')) ||
-           (val.start_with?("'") && val.end_with?("'"))
+        if val.length >= 2 &&
+           ((val.start_with?('"') && val.end_with?('"')) ||
+            (val.start_with?("'") && val.end_with?("'")))
           val = val[1..-2]
         end
         out[key] = val

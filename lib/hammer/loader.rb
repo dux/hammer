@@ -38,31 +38,37 @@ class Hammer
 
     def resolve_pattern(anchor, pattern)
       abs = File.expand_path(pattern, anchor)
+      # A real file/dir wins over glob interpretation, so a literal path
+      # whose name contains [ ] { } * ? still resolves. Directory: discover
+      # *_hammer.rb under it (empty result is OK - an app may have none).
+      return [abs] if File.file?(abs)
+      return discover(abs) if File.directory?(abs)
       if abs.match?(/[\*\?\[\{]/)
         matches = Dir.glob(abs).sort
         raise Hammer::Error, "load: no files matched #{pattern.inspect}" if matches.empty?
         return matches
       end
-      # Directory: discover *_hammer.rb under it. Empty result is OK
-      # (an app may legitimately have no fragments).
-      return discover(abs) if File.directory?(abs)
-      return [abs] if File.file?(abs)
       raise Hammer::Error, "load: no files matched #{pattern.inspect}"
     end
 
     def discover(dir)
       return [] unless File.directory?(dir)
       out = []
-      walk(dir, out)
+      walk(dir, out, {})
       out.sort
     end
 
-    def walk(dir, out)
+    # `seen` tracks visited real paths so a cyclic directory symlink
+    # doesn't recurse forever.
+    def walk(dir, out, seen)
+      real = File.realpath(dir) rescue dir
+      return if seen[real]
+      seen[real] = true
       Dir.each_child(dir) do |entry|
         full = File.join(dir, entry)
         if File.directory?(full)
           next if SKIP_DIRS.include?(entry) || entry.start_with?('.')
-          walk(full, out)
+          walk(full, out, seen)
         elsif entry.end_with?('_hammer.rb')
           out << full
         end
