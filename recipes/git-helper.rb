@@ -142,8 +142,8 @@ helpers do
       if message.empty?
         run 'git reset --mixed'
         exit
-      elsif message.length < 5
-        say 'Please add better commit message, min length 5 chars', :red
+      elsif message.length < 1
+        say 'Please add better commit message, min length 1 chars', :red
         next
       else
         bump_version

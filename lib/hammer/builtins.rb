@@ -31,6 +31,7 @@ class Hammer
       register_version(h) unless h.commands.key?('version')
       register_recipes(h) unless h.commands.key?('recipes')
       register_init(h)    unless h.commands.key?('init')
+      register_json(h)    unless h.commands.key?('json')
     end
 
     def register_help(klass)
@@ -108,6 +109,29 @@ class Hammer
         task :init do
           desc 'Write a starter Hammerfile in the current directory'
           proc { Hammer::Builtins.write_starter_hammerfile }
+        end
+      end
+    end
+
+    def register_json(klass)
+      klass.class_eval do
+        task :json do
+          desc <<~TXT
+            Dump the CLI definition as JSON: tasks grouped exactly like
+            the bare-`hammer` listing, each with desc, options, examples,
+            aliases, needs. Consumed by the macOS GUI and any tooling
+            that wants the full Hammerfile spec.
+          TXT
+          example 'h:json'
+          example 'h:json --all       # include the reserved h: tasks'
+          example 'h:json --compact   # minified, single line'
+          opt :all,     type: :boolean, desc: 'include reserved built-in h: tasks'
+          opt :compact, type: :boolean, desc: 'minified JSON (default: pretty)'
+          proc do |opts|
+            require 'json'
+            spec = self.class.root.export_spec(include_builtins: opts[:all])
+            puts opts[:compact] ? JSON.generate(spec) : JSON.pretty_generate(spec)
+          end
         end
       end
     end

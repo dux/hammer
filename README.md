@@ -562,6 +562,10 @@ Under the `h:` namespace:
 * `h:version` - print the lux-hammer version.
 * `h:recipes` - list / install / show / edit recipes.
 * `h:init` - write a starter Hammerfile in cwd (refuses if one exists).
+* `h:json` - dump the CLI definition as JSON (tasks grouped like the
+  bare listing, with desc/options/examples/aliases/needs); `--all`
+  includes the `h:` tasks, `--compact` minifies. Output is plain stdout
+  (the run banner goes to stderr), so `hammer h:json | jq` just works.
 
 Each is guarded by `unless commands.key?` within the namespace, so you
 can override one by reopening `namespace :h` in your Hammerfile.
@@ -572,6 +576,16 @@ current tree (if any) isn't loaded for that invocation:
 ```sh
 hammer --system h:recipes              # list recipes, ignoring any local Hammerfile
 hammer --system h:recipes --install srt ~/bin/srt
+```
+
+`--gui` opens a native macOS window for the current project: a sidebar of
+your tasks (grouped like the listing), a form per task built from its
+options, and a Run button that streams the task's output. It reads the
+project via `h:json` and runs each task as a `hammer <path> ...`
+subprocess. macOS / arm64 only.
+
+```sh
+hammer --gui                           # open the runner for the nearest Hammerfile
 ```
 
 Customize bare `hammer` by replacing `:default`:

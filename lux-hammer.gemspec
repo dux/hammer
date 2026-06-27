@@ -5,7 +5,10 @@ Gem::Specification.new 'lux-hammer', version do |s|
   s.description = 'Minimal, zero-dependency Thor-inspired CLI builder for Ruby. Class DSL and block DSL, subcommands, options, auto help, color helpers.'
   s.authors     = ['Dino Reic']
   s.email       = 'reic.dino@gmail.com'
-  s.files       = Dir['./lib/**/*.rb'] + Dir['./recipes/**/*.rb'] + ['./.version', './README.md', './AGENTS.md', './bin/hammer']
+  # Ship the prebuilt macOS GUI bundle so `hammer --gui` works on install
+  # (vendored .app; source lives under gui/HammerGUI in the repo).
+  gui_app       = Dir['./gui/Hammer.app/**/*'].select { |f| File.file?(f) }
+  s.files       = Dir['./lib/**/*.rb'] + Dir['./recipes/**/*.rb'] + gui_app + ['./.version', './README.md', './AGENTS.md', './bin/hammer']
   s.bindir      = 'bin'
   s.executables = ['hammer']
   s.homepage    = 'https://github.com/dux/hammer'

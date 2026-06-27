@@ -279,6 +279,9 @@ Task contracts:
   forward flags through). Bare invocation lists.
 * `h:init` - writes `Hammer::STARTER_HAMMERFILE` to `./Hammerfile`;
   refuses if one exists.
+* `h:json` - `puts JSON` of `root.export_spec` (tasks grouped exactly
+  like the bare listing via `section_for`, root group keyed `__root`).
+  `--all` keeps the `h:` tree, `--compact` minifies.
 
 The `:default` task and the `help` / `-h` / `--help` requests are
 invoked via `run_command(cmd, argv, full: name, quiet: true)` - the

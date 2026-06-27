@@ -583,6 +583,39 @@ class Hammer
       end
     end
 
+    # Machine-readable spec for `h:json` -> the macOS GUI (and, later,
+    # for lux itself to render the default listing). One hash:
+    #   commands => { group => { full_path => task_meta } }
+    # Grouping/sort mirror the bare-`hammer` listing exactly: group by
+    # the first namespace segment (a bare task sharing a namespace's name
+    # joins that group via section_for), root tasks under "__root",
+    # "__root" first, remaining groups in first-encounter order, tasks
+    # within a group by [depth, name]. Hidden (no-`desc`) tasks are
+    # skipped and the reserved `h:` tree is pruned unless include_builtins.
+    def export_spec(include_builtins: false)
+      groups = {}   # group => { full_path => meta }, in first-encounter order
+
+      each_command(include_builtins: include_builtins) do |path, c|
+        next if c.desc.empty?
+        section = section_for(path, nil, self)
+        key = section == :root ? '__root' : section.to_s
+        (groups[key] ||= {})[path] = c.to_h(path)
+      end
+
+      sort_tasks = ->(h) { h.sort_by { |p, _| [p.count(':'), p] }.to_h }
+      ordered = {}
+      ordered['__root'] = sort_tasks.call(groups.delete('__root')) if groups.key?('__root')
+      groups.each { |k, v| ordered[k] = sort_tasks.call(v) }
+
+      {
+        schema:         1,
+        hammer_version: VERSION,
+        program_name:   program_name,
+        app_desc:       app_desc,
+        commands:       ordered
+      }
+    end
+
     def run_command(cmd, argv, full: nil, quiet: false)
       # -h / --help is reserved on every command. Anywhere before a `--`
       # stop-marker, it short-circuits to per-command help.
@@ -622,7 +655,9 @@ class Hammer
         end
       end
       parts.concat(positional)
-      Shell.say "> #{parts.join(' ')}", :gray
+      # Diagnostic, not program output - to stderr so stdout stays clean
+      # for machine-readable tasks (`h:json`, `h:version`) and pipes.
+      warn Shell.paint("> #{parts.join(' ')}", :gray)
     end
 
     # Fire `before` hooks from root down through the namespace chain.
@@ -703,7 +738,7 @@ class Hammer
         each_command(include_builtins: extended) { |path, c| print_full_block(path, c) unless c.desc.empty? }
       else
         Shell.say ''
-        print_command_list(self, include_builtins: extended)
+        print_command_list(include_builtins: extended)
       end
       print_recipes_section if extended && root.instance_variable_get(:@hammer_binary)
       print_extras if extended
@@ -736,8 +771,8 @@ class Hammer
       Shell.say "Usage: #{program_name} #{prefix}:COMMAND [ARGS]", :cyan
       rows = []
       sibling = find_namespace_sibling(prefix)
-      rows << [prefix, sibling] if sibling && !sibling.desc.empty?
-      ns.each_command(prefix) { |path, c| rows << [path, c] unless c.desc.empty? }
+      rows << [prefix, sibling.to_h(prefix)] if sibling && !sibling.desc.empty?
+      ns.each_command(prefix) { |path, c| rows << [path, c.to_h(path)] unless c.desc.empty? }
       unless rows.empty?
         Shell.say ''
         Shell.say 'Commands:', :yellow
@@ -802,38 +837,30 @@ class Hammer
       Shell.say Hammer::STARTER_HAMMERFILE
     end
 
-    def print_command_list(klass, prefix = nil, include_builtins: true)
-      rows = []
-      # Commands without a `desc` are hidden from listings but still
-      # dispatchable + `hammer`-callable - useful for private helpers
-      # invoked from `before` hooks or other commands (e.g. `:env`, `:app`).
-      klass.each_command(prefix, include_builtins: include_builtins) { |full, c| rows << [full, c] unless c.desc.empty? }
-      return if rows.empty?
+    # Pure rendering off `export_spec` - the same grouped structure
+    # `h:json` emits, so the listing and the JSON can never drift.
+    # `export_spec` already does the work: drops hidden (no-`desc`)
+    # tasks, prunes the `h:` tree unless include_builtins, groups by
+    # first namespace segment ("__root" for bare tasks), orders "__root"
+    # first, and sorts each group by [depth, name].
+    def print_command_list(include_builtins: true)
+      groups = export_spec(include_builtins: include_builtins)[:commands]
+      return if groups.empty?
 
-      # group by "section" = everything between the view prefix and the
-      # leaf name. Bare leaves go in :root.
-      groups = rows.group_by { |full, _| section_for(full, prefix, klass) }
-      width  = rows.map { |full, _| full.length }.max
-      first  = true
-
-      if (rooted = groups.delete(:root))
-        Shell.say 'Commands:', :yellow
-        emit_rows(rooted.sort_by { |full, _| [full.count(':'), full] }, width)
-        first = false
-      end
-
-      groups.each do |section, items|
-        Shell.say unless first
-        first = false
-        Shell.say "#{section}:", :yellow
-        emit_rows(items.sort_by { |full, _| [full.count(':'), full] }, width)
+      width = groups.values.flat_map(&:keys).map(&:length).max
+      groups.each_with_index do |(section, tasks), i|
+        Shell.say unless i.zero?
+        Shell.say(section == '__root' ? 'Commands:' : "#{section}:", :yellow)
+        emit_rows(tasks.to_a, width)
       end
     end
 
+    # `rows` is an array of [full_path, task_meta] - the per-task hashes
+    # from `Command#to_h` (also used to render namespace listings).
     def emit_rows(rows, width)
-      rows.each do |full, c|
-        brief = c.alts.empty? ? c.brief : "#{c.brief} (alt: #{c.alts.join(', ')})"
-        brief = "#{brief} #{Shell.paint('(redefined)', :yellow)}" if c.prev_location
+      rows.each do |full, t|
+        brief = t[:alts].empty? ? t[:brief] : "#{t[:brief]} (alt: #{t[:alts].join(', ')})"
+        brief = "#{brief} #{Shell.paint('(redefined)', :yellow)}" if t[:redefined]
         Shell.say "  #{program_name} #{full.ljust(width)}  # #{brief}"
       end
     end
@@ -1047,6 +1074,7 @@ class Hammer
   def self.cli(argv = ARGV)
     argv = argv.dup
     force_system = !!argv.delete('--system')
+    launch_gui   = !!argv.delete('--gui')
 
     # Shebang invocation: `hammer /path/to/script ...args` (kernel passes
     # the script path as argv[0] for `#!/usr/bin/env hammer` files).
@@ -1060,6 +1088,12 @@ class Hammer
     end
 
     path = force_system ? nil : find_hammerfile(Dir.pwd)
+
+    # `hammer --gui` opens the native macOS runner pointed at this project
+    # (the Hammerfile's dir, or cwd when none was found). The CLI just
+    # launches the bundled app and returns.
+    return launch_gui!(path ? File.dirname(path) : Dir.pwd) if launch_gui
+
     unless path
       # No Hammerfile (or --system) - all built-ins are reachable. Bare
       # `hammer`, `hammer h:recipes`, `hammer h:update`, `hammer h:agents`,
@@ -1186,6 +1220,23 @@ class Hammer
       return nil if parent == dir
       dir = parent
     end
+  end
+
+  # Spawn the vendored macOS GUI (gui/Hammer.app), pointed at the project
+  # dir and this hammer binary. Launched directly (not via `open`) so it
+  # inherits the caller's environment - the GUI shells back out to this
+  # same `hammer` for `h:json` and task runs, and that needs the same PATH.
+  def self.launch_gui!(project_dir)
+    bin = File.expand_path('../gui/Hammer.app/Contents/MacOS/HammerGUI', __dir__)
+    unless File.executable?(bin)
+      Shell.print_error "GUI app not found at #{bin}"
+      Shell.say 'build it: ./gui/HammerGUI/build_app.sh', :yellow
+      exit 1
+    end
+    hammer_bin = (File.realpath($PROGRAM_NAME) rescue File.expand_path($PROGRAM_NAME))
+    pid = Process.spawn(bin, '--project', File.expand_path(project_dir), '--hammer', hammer_bin)
+    Process.detach(pid)
+    Shell.say "launched Hammer GUI for #{project_dir} (pid #{pid})", :green
   end
 
 end

@@ -78,5 +78,24 @@ class Hammer
       return '' if default.nil?
       "(default: #{default.inspect})"
     end
+
+    # Structured form for JSON export (`h:json`). The GUI maps `type`
+    # to a form widget; `default`/`required`/`desc` decorate it. Mirrors
+    # the data behind `usage`. `negation` is only meaningful for booleans.
+    def to_h
+      h = {
+        name:        name.to_s,
+        type:        type.to_s,
+        default:     default,
+        required:    required,
+        desc:        desc,
+        placeholder: placeholder,
+        switch:      switch,
+        aliases:     aliases,
+        usage:       usage.strip
+      }
+      h[:negation] = negation if boolean?
+      h
+    end
   end
 end

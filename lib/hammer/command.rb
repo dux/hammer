@@ -63,6 +63,26 @@ class Hammer
       end
     end
 
+    # Structured form for JSON export (`h:json`). `path` is the full
+    # colon path supplied by the tree walk - a Command doesn't know its
+    # own namespace prefix. `hidden` follows the help rule: a task with
+    # no `desc` still dispatches but is hidden from listings.
+    def to_h(path = name)
+      {
+        name:      name,
+        path:      path,
+        desc:      desc,
+        brief:     brief,
+        hidden:    desc.empty?,
+        redefined: !prev_location.nil?,
+        location:  location,
+        alts:      alts,
+        needs:     needs,
+        examples:  examples,
+        options:   options.map(&:to_h)
+      }
+    end
+
     private
 
     def short_flag?(switch)
