@@ -1045,6 +1045,68 @@ class DslTest < Minitest::Test
     assert_equal [:first, :second], log
   end
 
+  # ----- cron ---------------------------------------------------------
+
+  def test_cron_sets_schedule_metadata
+    cli = build_cli do
+      task :backup do
+        desc 'Nightly backup'
+        cron '@daily'
+        proc { |_| }
+      end
+    end
+    cmd = cli.commands['backup']
+    assert_equal '@daily', cmd.cron
+    assert_kind_of Hammer::Cron, cmd.cron_schedule
+  end
+
+  def test_cron_invalid_expression_fails_at_definition
+    err = assert_raises(Hammer::Error) do
+      build_cli do
+        task :backup do
+          cron '99 * * * *'
+          proc { |_| }
+        end
+      end
+    end
+    assert_match(/minute/, err.message)
+  end
+
+  def test_cron_in_def_style_command
+    cli = Class.new(Hammer) do
+      desc 'Tick'
+      cron '10m'
+      define_method(:tick) { |_| }
+    end
+    assert_equal '10m', cli.commands['tick'].cron
+    assert_equal 600, cli.commands['tick'].cron_schedule.interval
+  end
+
+  def test_cron_does_not_leak_across_tasks
+    cli = build_cli do
+      task :scheduled do
+        cron '5m'
+        proc { |_| }
+      end
+      task :plain do
+        proc { |_| }
+      end
+    end
+    assert_nil cli.commands['plain'].cron
+  end
+
+  def test_cron_shows_in_command_help
+    cli = build_cli do
+      task :backup do
+        desc 'Nightly backup'
+        cron '@daily'
+        proc { |_| }
+      end
+    end
+    out, = capture { cli.start(['backup', '-h']) }
+    assert_includes out, 'cron: @daily'
+  end
+
   def test_block_dsl_alt
     hits = []
     capture do

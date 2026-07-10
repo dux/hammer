@@ -45,8 +45,61 @@ class BuiltinsTest < Minitest::Test
     assert klass.commands.key?('default'), 'missing root :default'
     h = klass.namespaces['h']
     refute_nil h, 'missing :h namespace'
-    %w[help update agents version recipes init].each do |name|
+    %w[help update agents version recipes init json cron].each do |name|
       assert h.commands.key?(name), "missing h:#{name} after register"
+    end
+  end
+
+  # ----- h:cron -------------------------------------------------------
+
+  def test_cron_lists_scheduled_jobs
+    with_hammerfile(<<~RUBY) do
+      task :tick do
+        desc 'Tick'
+        cron '*/5 * * * *'
+        proc { |_| }
+      end
+      task :plain do
+        desc 'No schedule'
+        proc { |_| }
+      end
+    RUBY
+      out, = capture { Hammer.cli(['h:cron', '--list']) }
+      assert_includes out, 'tick'
+      assert_includes out, '*/5 * * * *'
+      refute_includes out, 'plain'
+    end
+  end
+
+  def test_cron_errors_when_nothing_scheduled
+    with_hammerfile(<<~RUBY) do
+      task :plain do
+        desc 'No schedule'
+        proc { |_| }
+      end
+    RUBY
+      _, err, status = capture_exit { Hammer.cli(['h:cron', '--list']) }
+      assert_equal 1, status
+      assert_includes err, 'no tasks declare a cron schedule'
+    end
+  end
+
+  def test_cron_service_prints_unit_for_platform
+    with_hammerfile(<<~RUBY) do
+      task :tick do
+        cron '1m'
+        proc { |_| }
+      end
+    RUBY
+      out, = capture { Hammer.cli(['h:cron', '--service', '--port=9999']) }
+      if RUBY_PLATFORM.include?('darwin')
+        assert_includes out, '<key>WorkingDirectory</key>'
+      else
+        assert_includes out, 'WorkingDirectory='
+        assert_includes out, 'Restart=on-failure'
+      end
+      assert_includes out, 'h:cron'
+      assert_includes out, '--port=9999'
     end
   end
 

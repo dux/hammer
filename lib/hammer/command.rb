@@ -1,7 +1,7 @@
 class Hammer
   # A single registered command on a Hammer class.
   class Command
-    attr_reader :name, :desc, :options, :examples, :alts, :needs
+    attr_reader :name, :desc, :options, :examples, :alts, :needs, :cron
     attr_accessor :handler, :location, :prev_location
 
     def initialize(name:, desc: '', handler: nil)
@@ -33,6 +33,19 @@ class Hammer
 
     def add_need(name)
       @needs << name.to_s
+    end
+
+    # Store a `cron '<expr>'` schedule. The raw string is kept for
+    # display/export; parsing happens here so an invalid expression
+    # raises Hammer::Error at definition time, not when the job server
+    # starts. The parsed Hammer::Cron is what the scheduler consumes.
+    def set_cron(expr)
+      @cron_schedule = Hammer::Cron.new(expr)
+      @cron = @cron_schedule.source
+    end
+
+    def cron_schedule
+      @cron_schedule
     end
 
     def matches?(name)
@@ -78,6 +91,7 @@ class Hammer
         location:  location,
         alts:      alts,
         needs:     needs,
+        cron:      cron,
         examples:  examples,
         options:   options.map(&:to_h)
       }

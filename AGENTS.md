@@ -41,6 +41,9 @@ lib/hammer/shell.rb         # ANSI/IO helpers
 lib/hammer/option.rb        # One option definition
 lib/hammer/parser.rb        # ARGV -> [positional, opts_hash]
 lib/hammer/command.rb       # One registered command (name, opts, alts, handler)
+lib/hammer/cron.rb          # `cron '<expr>'` schedule parser (cron/interval/@shortcut)
+lib/hammer/cron_server.rb   # `h:cron` job server (scheduler, logs, state; lazy-loaded)
+lib/hammer/cron_web.rb      # job server web UI (stdlib TCPServer; lazy-loaded)
 lib/hammer/loader.rb        # `*_hammer.rb` fragment loader (auto/glob/file)
 lib/hammer/builder.rb       # Block-DSL context (Hammerfile / Hammer.run)
 lib/hammer/command_builder.rb # `task :name do ... end` context
@@ -54,6 +57,8 @@ test/option_test.rb         # Option declaration / casting
 test/command_test.rb        # Command data type
 test/shell_test.rb          # ANSI / IO helpers
 test/cli_test.rb            # `hammer` binary end-to-end
+test/cron_test.rb           # schedule parser (matches?/due?/next_run)
+test/cron_server_test.rb    # job discovery, state, rotation, web UI
 examples/Hammerfile         # Reference Hammerfile
 examples/class_dsl.rb       # Reference class DSL usage
 examples/block_dsl.rb       # Reference block DSL usage
@@ -73,11 +78,18 @@ Inside a `task :name do ... end` block (CommandBuilder context):
   resolved against root (same lookup as `hammer`), deduped per
   top-level `start` so each prereq fires at most once. Dedupe also
   spans `+`-chained segments. Unknown prereq raises `Hammer::Error`.
+* `cron '<expr>'` - schedule for the `h:cron` job server. Accepts
+  5-field cron (`'*/10 * * * *'`), an interval (`'10m'`, `'2h'`, `'1d'`,
+  counted from the last run) or `@hourly` / `@daily` / `@weekly` /
+  `@monthly`. Parsed eagerly (`Hammer::Cron.new`) so an invalid
+  expression raises `Hammer::Error` at definition time. Stored on the
+  Command (`cmd.cron` raw string, `cmd.cron_schedule` parsed), exported
+  by `h:json`, shown in per-command help.
 * `proc do |opts| ... end` - **the last expression**, becomes handler
 
 At class scope (for `def`-style commands):
 
-* `desc`, `example`, `opt`, `alt`, `needs` set pending state
+* `desc`, `example`, `opt`, `alt`, `needs`, `cron` set pending state
 * The next `def` consumes the pending state IF `desc` was set; otherwise
   the method is treated as a plain helper
 * Methods with arity 0 are called without opts; methods that take an arg
@@ -249,7 +261,7 @@ reserved `h:` namespace.
 
 * Root: `:default` (hidden, carries `--version` / `-v`).
 * `h:` namespace: `h:help`, `h:update`, `h:agents`, `h:version`,
-  `h:recipes`, `h:init`.
+  `h:recipes`, `h:init`, `h:json`, `h:cron`.
 
 `h:` is the reserved built-in namespace - keeping the tool-meta commands
 there means they never collide with a project's root tasks, so there's
@@ -282,6 +294,20 @@ Task contracts:
 * `h:json` - `puts JSON` of `root.export_spec` (tasks grouped exactly
   like the bare listing via `section_for`, root group keyed `__root`).
   `--all` keeps the `h:` tree, `--compact` minifies.
+* `h:cron` - foreground job server for tasks with a `cron` schedule.
+  Lazy-requires `hammer/cron_server`. Ticks each minute; every due job
+  runs in a fresh subprocess (`hammer ns:task`, env `HAMMER_QUIET=1
+  NO_COLOR=1`, stdin closed, chdir to the Hammerfile dir), stdout+stderr
+  appended to `log/hammer/<slug>.log` (`:` -> `-`; rotated to `.log.1`
+  past 1 MB, max 2 files). Last runs persist in
+  `tmp/hammer/cron.state.json` (atomic tmp+rename) so restarts don't
+  re-fire; a live pid recorded there blocks a second instance.
+  Overlapping runs of the same job are skipped, never queued. Web UI on
+  `127.0.0.1` only (default port 4267, hand-rolled HTTP in
+  `hammer/cron_web.rb` - no webrick, keep it dependency-free): jobs
+  table, per-job log tail, POST run-now, `/json` status. Flags:
+  `--port`, `--list` (print jobs + next runs, exit), `--service` (print
+  launchd plist / systemd unit, install hints on stderr).
 
 The `:default` task and the `help` / `-h` / `--help` requests are
 invoked via `run_command(cmd, argv, full: name, quiet: true)` - the

@@ -563,9 +563,12 @@ Under the `h:` namespace:
 * `h:recipes` - list / install / show / edit recipes.
 * `h:init` - write a starter Hammerfile in cwd (refuses if one exists).
 * `h:json` - dump the CLI definition as JSON (tasks grouped like the
-  bare listing, with desc/options/examples/aliases/needs); `--all`
+  bare listing, with desc/options/examples/aliases/needs/cron); `--all`
   includes the `h:` tasks, `--compact` minifies. Output is plain stdout
   (the run banner goes to stderr), so `hammer h:json | jq` just works.
+* `h:cron` - job server: runs every task that declares a
+  `cron '<expr>'` schedule, with a localhost web UI for status and
+  logs. See [Cron / job server](#cron--job-server).
 
 Each is guarded by `unless commands.key?` within the namespace, so you
 can override one by reopening `namespace :h` in your Hammerfile.
@@ -624,6 +627,83 @@ end
 
 `-h` / `--help` stay reserved on every command - you can't shadow them
 with an `opt`.
+
+## Cron / job server
+
+Any task can declare a schedule with `cron`; `hammer h:cron` then runs
+those tasks on time, like a project-local crontab with a web UI:
+
+```ruby
+task :backup do
+  desc 'Snapshot the database'
+  cron '@daily'                    # 00:00 every day
+  proc { |_| sh 'bin/backup' }
+end
+
+namespace :cache do
+  task :warm do
+    desc 'Refresh hot caches'
+    cron '10m'                     # every 10 minutes
+    proc { |_| sh 'bin/warm-cache' }
+  end
+end
+```
+
+Accepted schedule forms:
+
+| form | example | meaning |
+|---|---|---|
+| 5-field cron | `*/10 * * * *` | standard crontab (`min hour dom mon dow`) |
+| interval | `10m`, `2h`, `1d` | every N minutes/hours/days, counted from the last run |
+| shortcut | `@hourly`, `@daily`, `@weekly`, `@monthly` | expands to the cron equivalent |
+
+Careful with raw cron fields: `10 * * * *` means "minute 10 of every
+hour", not "every 10 minutes" - that's `*/10 * * * *`, or just `10m`.
+Cron fields support `*`, `a`, `a-b`, `*/n`, `a-b/n` and comma lists
+(numeric values only). Weekday `7` equals `0` (Sunday). Intervals are
+not clock-aligned, so odd periods like `90m` work; a job that never ran
+fires on the server's first tick. Invalid expressions fail at
+Hammerfile load, not at runtime.
+
+Run the server:
+
+```sh
+hammer h:cron                      # scheduler + web UI, Ctrl-C to stop
+hammer h:cron --port=7777          # UI on another port (default 4267)
+hammer h:cron --list               # print jobs + next runs, then exit
+```
+
+The web UI at `http://127.0.0.1:4267` (localhost only, never a public
+interface) lists every job with its schedule, last/next run, status and
+duration, shows per-job logs, and has a "run now" button for manual
+triggers. `GET /json` serves the same status for scripting.
+
+Each run executes in a fresh subprocess (`hammer ns:task` - same
+isolation as the GUI runner), through the full normal pipeline: Bundler,
+dotenv, `before` hooks, `needs`. Output goes to a per-job log:
+
+```
+log/hammer/backup.log              # current log (db:backup -> db-backup.log)
+log/hammer/backup.log.1            # previous, rotated past 1 MB - max 2 files
+tmp/hammer/cron.state.json         # last runs + server pid, survives restarts
+```
+
+You probably want `log/hammer/` and `tmp/hammer/` in `.gitignore`.
+
+Overlap policy: if a run is still going when the next one comes due,
+the new run is skipped (noted in the job log) - jobs never pile up.
+Because last runs persist in the state file, a restart neither re-fires
+jobs nor resets interval clocks, and a second `h:cron` for the same
+project refuses to start while one is already running.
+
+To keep it running supervised, `--service` prints a ready-to-save
+launchd plist (macOS) or systemd user unit (linux) - it only prints,
+installing is up to you:
+
+```sh
+hammer h:cron --service > ~/.config/systemd/user/hammer-cron.service
+systemctl --user enable --now hammer-cron
+```
 
 ## Prereqs (`needs`)
 

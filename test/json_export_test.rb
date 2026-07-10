@@ -11,6 +11,7 @@ class JsonExportTest < Minitest::Test
       example 'build --env=prod'
       alt :b
       needs :env
+      cron '*/5 * * * *'
       opt :env,     default: 'dev', desc: 'target env'
       opt :verbose, type: :boolean, alias: :v, desc: 'noisy'
       proc { |_| }
@@ -71,7 +72,11 @@ class JsonExportTest < Minitest::Test
       assert_equal 'Build the project', b['desc']
       assert_equal ['b'], b['alts']
       assert_equal ['env'], b['needs']
+      assert_equal '*/5 * * * *', b['cron']
       assert_includes b['examples'], 'build --env=prod'
+
+      m = spec['commands']['db']['db:migrate']
+      assert_nil m['cron']   # unscheduled tasks export cron: null
 
       env = b['options'].find { |o| o['name'] == 'env' }
       assert_equal 'string', env['type']

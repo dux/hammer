@@ -26,5 +26,13 @@ class Hammer
     def needs(*names)
       names.each { |n| @cmd.add_need(n) }
     end
+
+    # Schedule this task for the `hammer h:cron` job server. Accepts a
+    # 5-field cron expression ('*/10 * * * *'), a simple interval ('10m',
+    # '2h', '1d') or a shortcut (@hourly, @daily, @weekly, @monthly).
+    # Validated immediately, so a typo fails at Hammerfile load.
+    def cron(expr)
+      @cmd.set_cron(expr)
+    end
   end
 end

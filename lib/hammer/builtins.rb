@@ -32,6 +32,7 @@ class Hammer
       register_recipes(h) unless h.commands.key?('recipes')
       register_init(h)    unless h.commands.key?('init')
       register_json(h)    unless h.commands.key?('json')
+      register_cron(h)    unless h.commands.key?('cron')
     end
 
     def register_help(klass)
@@ -109,6 +110,46 @@ class Hammer
         task :init do
           desc 'Write a starter Hammerfile in the current directory'
           proc { Hammer::Builtins.write_starter_hammerfile }
+        end
+      end
+    end
+
+    # The job server: runs every task that declares `cron '<expr>'` on
+    # its schedule, in the foreground, with a localhost web UI for
+    # status, logs and manual triggers. Per-job logs land in log/hammer/
+    # (rotated at 1 MB, max 2 files), state in tmp/hammer/cron.state.json.
+    def register_cron(klass)
+      klass.class_eval do
+        task :cron do
+          desc <<~TXT
+            Job server: run tasks that declare a `cron '<expr>'` schedule.
+
+            Runs in the foreground (Ctrl-C to stop) with a web UI on
+            localhost for job status, per-job logs and manual runs. Use
+            --service to print a launchd plist / systemd unit and let the
+            OS supervise it.
+          TXT
+          example 'h:cron'
+          example 'h:cron --port=7777'
+          example 'h:cron --list'
+          example 'h:cron --service > ~/.config/systemd/user/hammer-cron.service'
+          opt :port,    type: :integer, default: 4267, desc: 'web UI port (binds 127.0.0.1 only)'
+          opt :list,    type: :boolean, desc: 'print scheduled jobs + next runs, then exit'
+          opt :service, type: :boolean, desc: 'print a launchd plist (macOS) / systemd unit (linux)'
+          proc do |opts|
+            if self.class.root.instance_variable_get(:@no_hammerfile)
+              error "no Hammerfile found - h:cron needs a project with scheduled tasks"
+            end
+            require_relative 'cron_server'
+            server = Hammer::CronServer.new(self.class.root, port: opts[:port])
+            if opts[:service]
+              server.print_service_unit
+            elsif opts[:list]
+              server.print_startup_summary
+            else
+              server.run!
+            end
+          end
         end
       end
     end

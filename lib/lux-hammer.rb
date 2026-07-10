@@ -2,6 +2,7 @@ require_relative 'hammer/shell'
 require_relative 'hammer/option'
 require_relative 'hammer/parser'
 require_relative 'hammer/command'
+require_relative 'hammer/cron'
 require_relative 'hammer/loader'
 require_relative 'hammer/builder'
 require_relative 'hammer/command_builder'
@@ -62,6 +63,7 @@ class Hammer
       sub.instance_variable_set(:@pending_options, [])
       sub.instance_variable_set(:@pending_alts, [])
       sub.instance_variable_set(:@pending_needs, [])
+      sub.instance_variable_set(:@pending_cron, nil)
     end
 
     # ----- class-level DSL for `def`-style commands ---------------------
@@ -80,6 +82,7 @@ class Hammer
     def opt(name, **o)   ; @pending_options << Option.new(name, **o) end
     def alt(*names)      ; @pending_alts.concat(names) end
     def needs(*names)    ; @pending_needs.concat(names) end
+    def cron(expr)       ; @pending_cron = expr end
 
     def method_added(method_name)
       super
@@ -90,6 +93,7 @@ class Hammer
       @pending_options.each  { |o| cmd.add_option(o) }
       @pending_alts.each     { |n| cmd.add_alt(n) }
       @pending_needs.each    { |n| cmd.add_need(n) }
+      cmd.set_cron(@pending_cron) if @pending_cron
 
       # If the method takes no args, call it without opts. Otherwise pass
       # opts. So both `def build` and `def build(opts)` work.
@@ -104,6 +108,7 @@ class Hammer
       @pending_options  = []
       @pending_alts     = []
       @pending_needs    = []
+      @pending_cron     = nil
     end
 
     # Resolved lazily on first read and memoized, so callers that need the
@@ -183,6 +188,7 @@ class Hammer
       @pending_options  = []
       @pending_alts     = []
       @pending_needs    = []
+      @pending_cron     = nil
     end
 
     # Open a namespace (group of commands). Everything inside the block
@@ -905,6 +911,7 @@ class Hammer
         Shell.say(stripped.empty? ? '' : "  #{stripped}")
       end unless cmd.desc.empty?
       Shell.say "  alias: #{cmd.alts.join(', ')}" unless cmd.alts.empty?
+      Shell.say "  cron: #{cmd.cron}" if cmd.cron
       unless cmd.options.empty?
         Shell.say ''
         Shell.say 'Options:', :yellow
