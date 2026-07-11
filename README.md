@@ -683,11 +683,11 @@ On a shared machine, protect the UI with HTTP basic auth - useful since
 "run now" executes tasks:
 
 ```sh
-hammer h:cron --pass=secret        # or: HAMMER_CRON_PASS=secret hammer h:cron
+hammer h:cron --pass=secret        # or: CRON_HTTP_PASS=secret hammer h:cron
 curl -u :secret http://127.0.0.1:4267/json   # any username, password checked
 ```
 
-Prefer the `HAMMER_CRON_PASS` env var when other users can read your
+Prefer the `CRON_HTTP_PASS` env var when other users can read your
 process list (`ps` shows flag values). A `--service` unit generated
 while `--pass` is set carries the flag along, so keep that file private.
 Note this is plain HTTP - credentials are encoded, not encrypted; for

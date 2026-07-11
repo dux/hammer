@@ -103,6 +103,22 @@ class BuiltinsTest < Minitest::Test
     end
   end
 
+  def test_cron_reads_password_from_dotenv
+    with_hammerfile(<<~RUBY) do |dir|
+      task :tick do
+        cron '1m'
+        proc { |_| }
+      end
+    RUBY
+      File.write(File.join(dir, '.env'), "CRON_HTTP_PASS=from-dotenv\n")
+      previous = ENV.delete('CRON_HTTP_PASS')
+      out, = capture { Hammer.cli(['h:cron', '--service']) }
+      assert_includes out, '--pass=from-dotenv'
+    ensure
+      previous.nil? ? ENV.delete('CRON_HTTP_PASS') : ENV['CRON_HTTP_PASS'] = previous
+    end
+  end
+
   def test_register_skips_when_user_defined
     klass = Class.new(Hammer) do
       task :default do

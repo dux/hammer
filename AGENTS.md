@@ -313,7 +313,7 @@ Task contracts:
   `hammer/cron_web.rb` - no webrick, keep it dependency-free): jobs
   table, per-job log tail, POST run-now, `/json` status. Flags:
   `--port`, `--pass` (HTTP basic auth on every route, any username,
-  constant-time compare; falls back to `HAMMER_CRON_PASS` env),
+  constant-time compare; falls back to `CRON_HTTP_PASS` env),
   `--list` (print jobs + next runs, exit), `--service` (print launchd
   plist / systemd unit, carries `--pass` when set, install hints on
   stderr).

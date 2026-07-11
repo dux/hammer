@@ -265,41 +265,11 @@ class Hammer
     def print_service_unit
       if RUBY_PLATFORM.include?('darwin')
         label = "com.lux-hammer.cron.#{File.basename(@root_dir)}"
-        puts <<~XML
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>Label</key><string>#{label}</string>
-            <key>ProgramArguments</key>
-            <array>
-              <string>#{@hammer_bin}</string>
-              <string>h:cron</string>
-              <string>--port=#{@port}</string>#{@pass ? "\n    <string>--pass=#{@pass}</string>" : ''}
-            </array>
-            <key>WorkingDirectory</key><string>#{@root_dir}</string>
-            <key>RunAtLoad</key><true/>
-            <key>KeepAlive</key><true/>
-            <key>StandardOutPath</key><string>#{@root_dir}/log/hammer/cron-server.log</string>
-            <key>StandardErrorPath</key><string>#{@root_dir}/log/hammer/cron-server.log</string>
-          </dict>
-          </plist>
-        XML
+        puts launchd_service_unit(label)
         warn Shell.paint("# save to ~/Library/LaunchAgents/#{label}.plist, then:", :gray)
         warn Shell.paint("#   launchctl load ~/Library/LaunchAgents/#{label}.plist", :gray)
       else
-        puts <<~UNIT
-          [Unit]
-          Description=hammer h:cron job server (#{File.basename(@root_dir)})
-
-          [Service]
-          ExecStart=#{@hammer_bin} h:cron --port=#{@port}#{" --pass=#{@pass}" if @pass}
-          WorkingDirectory=#{@root_dir}
-          Restart=on-failure
-
-          [Install]
-          WantedBy=default.target
-        UNIT
+        puts systemd_service_unit
         warn Shell.paint('# save to ~/.config/systemd/user/hammer-cron.service, then:', :gray)
         warn Shell.paint('#   systemctl --user enable --now hammer-cron', :gray)
       end
@@ -325,6 +295,71 @@ class Hammer
     end
 
     private
+
+    def launchd_service_unit(label = "com.lux-hammer.cron.#{File.basename(@root_dir)}")
+      args = [@hammer_bin, 'h:cron', "--port=#{@port}"]
+      args << "--pass=#{@pass}" if @pass
+      arguments = args.map { |arg| "    <string>#{xml_escape(arg)}</string>" }.join("\n")
+      log_path = File.join(@root_dir, 'log/hammer/cron-server.log')
+
+      <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key><string>#{xml_escape(label)}</string>
+          <key>ProgramArguments</key>
+          <array>
+        #{arguments}
+          </array>
+          <key>WorkingDirectory</key><string>#{xml_escape(@root_dir)}</string>
+          <key>RunAtLoad</key><true/>
+          <key>KeepAlive</key><true/>
+          <key>StandardOutPath</key><string>#{xml_escape(log_path)}</string>
+          <key>StandardErrorPath</key><string>#{xml_escape(log_path)}</string>
+        </dict>
+        </plist>
+      XML
+    end
+
+    def systemd_service_unit
+      args = [@hammer_bin, 'h:cron', "--port=#{@port}"]
+      args << "--pass=#{@pass}" if @pass
+
+      <<~UNIT
+        [Unit]
+        Description=#{systemd_quote("hammer h:cron job server (#{File.basename(@root_dir)})")}
+
+        [Service]
+        ExecStart=#{args.map { |arg| systemd_quote(arg) }.join(' ')}
+        WorkingDirectory=#{systemd_quote(@root_dir)}
+        Restart=on-failure
+
+        [Install]
+        WantedBy=default.target
+      UNIT
+    end
+
+    def xml_escape(value)
+      value.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')
+           .gsub('"', '&quot;').gsub("'", '&apos;')
+    end
+
+    def systemd_quote(value)
+      escaped = value.to_s.gsub(/[\x00-\x1f\x7f%$\\"]/) do |char|
+        case char
+        when '%'  then '%%'
+        when '$'  then '$$'
+        when '\\' then '\\\\'
+        when '"'  then '\\"'
+        when "\n" then '\\n'
+        when "\r" then '\\r'
+        when "\t" then '\\t'
+        else format('\\x%02x', char.ord)
+        end
+      end
+      %Q{"#{escaped}"}
+    end
 
     # Refuse to start when the state file points at another live h:cron -
     # two schedulers would double-fire every job. Best-effort (no lock

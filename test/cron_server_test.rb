@@ -374,4 +374,29 @@ class CronServerTest < Minitest::Test
       end
     end
   end
+
+  def test_launchd_service_unit_xml_escapes_dynamic_values
+    Dir.mktmpdir(['hammer&', '<root>']) do |dir|
+      Dir.chdir(dir) do
+        server = Hammer::CronServer.new(build_cli(&CLI), port: 4267,
+                                        pass: 'secret&<value>')
+        out = server.send(:launchd_service_unit)
+        assert_includes out, '--pass=secret&amp;&lt;value&gt;'
+        assert_includes out, File.realpath(dir).gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')
+        refute_includes out, '--pass=secret&<value>'
+      end
+    end
+  end
+
+  def test_systemd_service_unit_quotes_dynamic_arguments
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        password = 'long secret%#"\\${HOME}'
+        server = Hammer::CronServer.new(build_cli(&CLI), port: 4267, pass: password)
+        out = server.send(:systemd_service_unit)
+        assert_includes out, '"--pass=long secret%%#\"\\\\$${HOME}"'
+        refute_includes out, ' --pass=long secret'
+      end
+    end
+  end
 end

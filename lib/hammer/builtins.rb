@@ -135,7 +135,7 @@ class Hammer
           example 'h:cron --list'
           example 'h:cron --service > ~/.config/systemd/user/hammer-cron.service'
           opt :port,    type: :integer, default: 4267, desc: 'web UI port (binds 127.0.0.1 only)'
-          opt :pass,    type: :string,  desc: 'HTTP basic-auth password for the web UI (or HAMMER_CRON_PASS env)'
+          opt :pass,    type: :string,  desc: 'HTTP basic-auth password for the web UI (or CRON_HTTP_PASS env)'
           opt :list,    type: :boolean, desc: 'print scheduled jobs + next runs, then exit'
           opt :service, type: :boolean, desc: 'print a launchd plist (macOS) / systemd unit (linux)'
           proc do |opts|
@@ -144,7 +144,7 @@ class Hammer
             end
             require_relative 'cron_server'
             server = Hammer::CronServer.new(self.class.root, port: opts[:port],
-                                            pass: opts[:pass] || ENV['HAMMER_CRON_PASS'])
+                                            pass: opts[:pass] || ENV['CRON_HTTP_PASS'])
             if opts[:service]
               server.print_service_unit
             elsif opts[:list]
