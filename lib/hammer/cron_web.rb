@@ -19,9 +19,10 @@ class Hammer
     REFRESH_SECONDS ||= 10
     TAIL_BYTES      ||= 65_536   # log viewer shows at most the last 64 KB
 
-    def initialize(server, port:)
+    def initialize(server, port:, pass: nil)
       @server = server
       @port   = port
+      @pass   = pass && !pass.empty? ? pass : nil
     end
 
     # Actual bound port - differs from the requested one only when the
@@ -67,18 +68,56 @@ class Hammer
     private
 
     # Minimal HTTP: request line + headers, drain any Content-Length body
-    # (our POSTs carry none we care about), then route.
+    # (our POSTs carry none we care about), then route. With a --pass
+    # configured every route requires HTTP Basic auth first.
     def handle(sock)
       line = sock.gets or return
       verb, target, = line.split(' ', 3)
       length = 0
+      auth   = nil
       while (h = sock.gets) && h.strip != ''
-        length = h.split(':', 2).last.to_i if h =~ /\Acontent-length:/i
+        length = h.split(':', 2).last.to_i    if h =~ /\Acontent-length:/i
+        auth   = h.split(':', 2).last.strip   if h =~ /\Aauthorization:/i
       end
       sock.read(length) if length > 0
 
+      return unauthorized(sock) if @pass && !authorized?(auth)
+
       path, query = target.to_s.split('?', 2)
       route(sock, verb, CGI.unescape(path.to_s), query.to_s)
+    end
+
+    # Only the password half of `user:pass` is checked - any username
+    # works (`curl -u :secret`). Constant-time compare so the password
+    # can't be guessed byte-by-byte from response timing.
+    def authorized?(header)
+      return false unless header && header =~ /\ABasic (.+)\z/
+      decoded = begin
+        Regexp.last_match(1).unpack1('m')
+      rescue ArgumentError
+        return false
+      end
+      pass = decoded.to_s.split(':', 2)[1].to_s
+      secure_compare(pass, @pass)
+    end
+
+    def secure_compare(a, b)
+      return false unless a.bytesize == b.bytesize
+      diff = 0
+      a.bytes.zip(b.bytes) { |x, y| diff |= x ^ y }
+      diff.zero?
+    end
+
+    # 401 + the WWW-Authenticate challenge that makes browsers pop the
+    # native login prompt.
+    def unauthorized(sock)
+      body = layout('unauthorized', '<p>401 - password required</p>')
+      sock.write "HTTP/1.1 401 Unauthorized\r\n" \
+                 "WWW-Authenticate: Basic realm=\"h:cron\"\r\n" \
+                 "Content-Type: text/html; charset=utf-8\r\n" \
+                 "Content-Length: #{body.bytesize}\r\n" \
+                 "Connection: close\r\n\r\n"
+      sock.write body
     end
 
     def route(sock, verb, path, query)
@@ -201,7 +240,7 @@ class Hammer
             .ok      { color: #2a7d2a; }
             .failed, .error { color: #c02626; }
             .running { color: #b8860b; }
-            .never   { color: #888; }
+            .never, .unknown { color: #888; }
             .files   { color: #888; }
             footer   { color: #aaa; margin-top: 2rem; font-size: 12px; }
             @media (prefers-color-scheme: dark) {

@@ -654,7 +654,7 @@ Accepted schedule forms:
 | form | example | meaning |
 |---|---|---|
 | 5-field cron | `*/10 * * * *` | standard crontab (`min hour dom mon dow`) |
-| interval | `10m`, `2h`, `1d` | every N minutes/hours/days, counted from the last run |
+| interval | `10s`, `10m`, `2h`, `1d` | every N seconds/minutes/hours/days, counted from the last run |
 | shortcut | `@hourly`, `@daily`, `@weekly`, `@monthly` | expands to the cron equivalent |
 
 Careful with raw cron fields: `10 * * * *` means "minute 10 of every
@@ -662,8 +662,9 @@ hour", not "every 10 minutes" - that's `*/10 * * * *`, or just `10m`.
 Cron fields support `*`, `a`, `a-b`, `*/n`, `a-b/n` and comma lists
 (numeric values only). Weekday `7` equals `0` (Sunday). Intervals are
 not clock-aligned, so odd periods like `90m` work; a job that never ran
-fires on the server's first tick. Invalid expressions fail at
-Hammerfile load, not at runtime.
+fires on the server's first tick. The scheduler ticks once per minute,
+or once per second when any job declares a sub-minute interval.
+Invalid expressions fail at Hammerfile load, not at runtime.
 
 Run the server:
 
@@ -677,6 +678,20 @@ The web UI at `http://127.0.0.1:4267` (localhost only, never a public
 interface) lists every job with its schedule, last/next run, status and
 duration, shows per-job logs, and has a "run now" button for manual
 triggers. `GET /json` serves the same status for scripting.
+
+On a shared machine, protect the UI with HTTP basic auth - useful since
+"run now" executes tasks:
+
+```sh
+hammer h:cron --pass=secret        # or: HAMMER_CRON_PASS=secret hammer h:cron
+curl -u :secret http://127.0.0.1:4267/json   # any username, password checked
+```
+
+Prefer the `HAMMER_CRON_PASS` env var when other users can read your
+process list (`ps` shows flag values). A `--service` unit generated
+while `--pass` is set carries the flag along, so keep that file private.
+Note this is plain HTTP - credentials are encoded, not encrypted; for
+anything beyond localhost put a TLS proxy in front.
 
 Each run executes in a fresh subprocess (`hammer ns:task` - same
 isolation as the GUI runner), through the full normal pipeline: Bundler,
@@ -694,7 +709,10 @@ Overlap policy: if a run is still going when the next one comes due,
 the new run is skipped (noted in the job log) - jobs never pile up.
 Because last runs persist in the state file, a restart neither re-fires
 jobs nor resets interval clocks, and a second `h:cron` for the same
-project refuses to start while one is already running.
+project refuses to start while one is already running. Running state
+survives restarts too: a job whose subprocess outlived a server crash
+is picked up again as `running` (no double-start), and one that died
+with the server shows `unknown` rather than a stale `running`.
 
 To keep it running supervised, `--service` prints a ready-to-save
 launchd plist (macOS) or systemd user unit (linux) - it only prints,

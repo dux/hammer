@@ -8,7 +8,7 @@ class Hammer
   #
   #   cron '*/10 * * * *'   # standard 5-field crontab
   #   cron '10m'            # simple interval: every 10 minutes
-  #   cron '2h'  / '1d'     # every 2 hours / once a day
+  #   cron '10s' / '2h' / '1d'  # seconds / hours / days
   #   cron '@daily'         # shortcut, expands to '0 0 * * *'
   #
   # Cron fields support '*', 'a', 'a-b', '*/n', 'a-b/n' and comma lists,
@@ -30,14 +30,14 @@ class Hammer
       [:month, 1, 12], [:weekday, 0, 7]
     ].freeze
 
-    INTERVAL_UNITS ||= { 'm' => 60, 'h' => 3600, 'd' => 86_400 }.freeze
+    INTERVAL_UNITS ||= { 's' => 1, 'm' => 60, 'h' => 3600, 'd' => 86_400 }.freeze
 
     attr_reader :source, :interval
 
     def initialize(expr)
       @source = expr.to_s.strip
 
-      if (m = @source.match(/\A(\d+)([mhd])\z/))
+      if (m = @source.match(/\A(\d+)([smhd])\z/))
         @interval = m[1].to_i * INTERVAL_UNITS[m[2]]
         raise Hammer::Error, "cron: interval must be > 0 in #{@source.inspect}" if @interval.zero?
         return
@@ -50,7 +50,7 @@ class Hammer
       parts = (SHORTCUTS[@source] || @source).split(/\s+/)
       unless parts.size == 5
         raise Hammer::Error, "cron: #{@source.inspect} - expected 5 fields ('*/10 * * * *'), " \
-                             "an interval ('10m', '2h', '1d') or a shortcut (#{SHORTCUTS.keys.join(', ')})"
+                             "an interval ('10s', '10m', '2h', '1d') or a shortcut (#{SHORTCUTS.keys.join(', ')})"
       end
 
       @fields   = FIELDS.each_with_index.map { |(name, lo, hi), i| parse_field(name, parts[i], lo, hi) }
@@ -75,10 +75,11 @@ class Hammer
       @dom_star || @dow_star ? dom_ok && dow_ok : dom_ok || dow_ok
     end
 
-    # Should the scheduler fire at `tick` (a minute-aligned Time), given
-    # the persisted last run? Cron mode fires once per matching minute;
-    # interval mode fires when a full interval has elapsed (or the job
-    # never ran, so a fresh job gives immediate feedback on first tick).
+    # Should the scheduler fire at `tick` (a boundary-aligned Time),
+    # given the persisted last run? Cron mode fires once per matching
+    # minute; interval mode fires when a full interval has elapsed (or
+    # the job never ran, so a fresh job gives immediate feedback on the
+    # first tick).
     def due?(tick, last_run)
       if interval?
         last_run.nil? || tick.to_i - last_run.to_i >= @interval

@@ -79,9 +79,9 @@ Inside a `task :name do ... end` block (CommandBuilder context):
   top-level `start` so each prereq fires at most once. Dedupe also
   spans `+`-chained segments. Unknown prereq raises `Hammer::Error`.
 * `cron '<expr>'` - schedule for the `h:cron` job server. Accepts
-  5-field cron (`'*/10 * * * *'`), an interval (`'10m'`, `'2h'`, `'1d'`,
-  counted from the last run) or `@hourly` / `@daily` / `@weekly` /
-  `@monthly`. Parsed eagerly (`Hammer::Cron.new`) so an invalid
+  5-field cron (`'*/10 * * * *'`), an interval (`'10s'`, `'10m'`,
+  `'2h'`, `'1d'`, counted from the last run) or `@hourly` / `@daily` /
+  `@weekly` / `@monthly`. Parsed eagerly (`Hammer::Cron.new`) so an invalid
   expression raises `Hammer::Error` at definition time. Stored on the
   Command (`cmd.cron` raw string, `cmd.cron_schedule` parsed), exported
   by `h:json`, shown in per-command help.
@@ -295,19 +295,28 @@ Task contracts:
   like the bare listing via `section_for`, root group keyed `__root`).
   `--all` keeps the `h:` tree, `--compact` minifies.
 * `h:cron` - foreground job server for tasks with a `cron` schedule.
-  Lazy-requires `hammer/cron_server`. Ticks each minute; every due job
+  Lazy-requires `hammer/cron_server`. Ticks each minute (each second
+  when any job has a sub-minute interval); every due job
   runs in a fresh subprocess (`hammer ns:task`, env `HAMMER_QUIET=1
   NO_COLOR=1`, stdin closed, chdir to the Hammerfile dir), stdout+stderr
   appended to `log/hammer/<slug>.log` (`:` -> `-`; rotated to `.log.1`
   past 1 MB, max 2 files). Last runs persist in
   `tmp/hammer/cron.state.json` (atomic tmp+rename) so restarts don't
   re-fire; a live pid recorded there blocks a second instance.
-  Overlapping runs of the same job are skipped, never queued. Web UI on
+  Running state persists too: each active run's child pid is saved, and
+  on restart a still-alive orphan is restored as `running` (a watcher
+  polls until it exits; the overlap guard keeps skipping), while a dead
+  one becomes status `unknown` (exit status lost) instead of a stale
+  `running`. Overlapping runs of the same job are skipped, never
+  queued. Web UI on
   `127.0.0.1` only (default port 4267, hand-rolled HTTP in
   `hammer/cron_web.rb` - no webrick, keep it dependency-free): jobs
   table, per-job log tail, POST run-now, `/json` status. Flags:
-  `--port`, `--list` (print jobs + next runs, exit), `--service` (print
-  launchd plist / systemd unit, install hints on stderr).
+  `--port`, `--pass` (HTTP basic auth on every route, any username,
+  constant-time compare; falls back to `HAMMER_CRON_PASS` env),
+  `--list` (print jobs + next runs, exit), `--service` (print launchd
+  plist / systemd unit, carries `--pass` when set, install hints on
+  stderr).
 
 The `:default` task and the `help` / `-h` / `--help` requests are
 invoked via `run_command(cmd, argv, full: name, quiet: true)` - the

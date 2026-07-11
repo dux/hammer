@@ -139,6 +139,69 @@ class CronServerTest < Minitest::Test
     end
   end
 
+  def test_state_saves_running_pid
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        server = Hammer::CronServer.new(build_cli(&CLI), port: 0)
+        job = server.jobs['tick']
+        job.status = 'running'
+        job.pid    = 12_345
+        server.save_state
+        saved = JSON.parse(File.read('tmp/hammer/cron.state.json'))
+        assert_equal 12_345, saved['jobs']['tick']['pid']
+        # the :starting placeholder must never leak into the file
+        job.pid = :starting
+        server.save_state
+        saved = JSON.parse(File.read('tmp/hammer/cron.state.json'))
+        assert_nil saved['jobs']['tick']['pid']
+      end
+    end
+  end
+
+  # Server died mid-run and the subprocess is gone too: the run's exit
+  # status is lost, so the job must come back as 'unknown', not stay
+  # 'running' forever.
+  def test_state_dead_orphan_becomes_unknown
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        dead_pid = Process.spawn('true')
+        Process.wait(dead_pid)
+        FileUtils.mkdir_p('tmp/hammer')
+        File.write('tmp/hammer/cron.state.json', JSON.generate(
+          schema: 1, jobs: { 'tick' => { last_run: 123, status: 'running', pid: dead_pid } }
+        ))
+        server = Hammer::CronServer.new(build_cli(&CLI), port: 0)
+        job = server.jobs['tick']
+        assert_equal 'unknown', job.status
+        refute job.running?
+      end
+    end
+  end
+
+  # Server died mid-run but the subprocess survived as an orphan: it
+  # must come back as running (so the overlap guard keeps skipping).
+  def test_state_live_orphan_restored_as_running
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        live_pid = Process.spawn('sleep', '30')
+        begin
+          FileUtils.mkdir_p('tmp/hammer')
+          File.write('tmp/hammer/cron.state.json', JSON.generate(
+            schema: 1, jobs: { 'tick' => { last_run: 123, status: 'running', pid: live_pid } }
+          ))
+          server = Hammer::CronServer.new(build_cli(&CLI), port: 0)
+          job = server.jobs['tick']
+          assert_equal 'running', job.status
+          assert_equal live_pid, job.pid
+          assert job.running?
+        ensure
+          Process.kill('KILL', live_pid)
+          Process.wait(live_pid)
+        end
+      end
+    end
+  end
+
   def test_state_prunes_undeclared_jobs_on_save
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
@@ -248,6 +311,67 @@ class CronServerTest < Minitest::Test
     with_web do |_, _, port, _|
       res = request(port, "POST /job/nope/run HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
       assert_includes res, '404 Not Found'
+    end
+  end
+
+  # ----- basic auth (--pass) ------------------------------------------------
+
+  def with_protected_web(pass)
+    with_server do |server, dir|
+      web = Hammer::CronWeb.new(server, port: 0, pass: pass).start
+      begin
+        yield server, web, web.bound_port, dir
+      ensure
+        web.stop
+      end
+    end
+  end
+
+  def basic(user_pass)
+    "Authorization: Basic #{[user_pass].pack('m0')}"
+  end
+
+  def test_web_pass_rejects_missing_and_wrong_credentials
+    with_protected_web('secret') do |_, _, port, _|
+      res = request(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+      assert_includes res, '401 Unauthorized'
+      assert_includes res, 'WWW-Authenticate: Basic realm="h:cron"'
+      refute_includes res, 'run now'
+
+      res = request(port, "GET / HTTP/1.1\r\nHost: x\r\n#{basic('user:wrong')}\r\n\r\n")
+      assert_includes res, '401 Unauthorized'
+
+      # run-now must be locked down too, not just the pages
+      res = request(port, "POST /job/tick/run HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+      assert_includes res, '401 Unauthorized'
+    end
+  end
+
+  def test_web_pass_accepts_correct_password_any_username
+    with_protected_web('secret') do |_, _, port, _|
+      res = request(port, "GET / HTTP/1.1\r\nHost: x\r\n#{basic('anyone:secret')}\r\n\r\n")
+      assert_includes res, '200 OK'
+      assert_includes res, 'db:backup'
+
+      res = request(port, "GET /json HTTP/1.1\r\nHost: x\r\n#{basic(':secret')}\r\n\r\n")
+      assert_includes res, '200 OK'
+    end
+  end
+
+  def test_web_empty_pass_disables_auth
+    with_protected_web('') do |_, _, port, _|
+      res = request(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+      assert_includes res, '200 OK'
+    end
+  end
+
+  def test_service_unit_carries_pass
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        server = Hammer::CronServer.new(build_cli(&CLI), port: 4267, pass: 'secret')
+        out, = capture { server.print_service_unit }
+        assert_includes out, '--pass=secret'
+      end
     end
   end
 end

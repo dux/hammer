@@ -178,7 +178,7 @@ namespace :prompt do
   def folders
     [
       ['local',  File.join(Dir.pwd, 'doc', 'command')],
-      ['global', File.expand_path('~/dev/skills/command')]
+      ['global', File.expand_path('~/dev/ai/command')]
     ]
   end
 

@@ -23,5 +23,15 @@ if File.exist?('Gemfile') && !defined?(Bundler)
 end
 
 require 'lux-hammer'
+
+# `hammer --dir` prints the gem root of the lux-hammer that actually loaded
+# (repo checkout or installed gem). Lets recipes locate the lib without
+# hardcoding a path: require File.join(`hammer --dir`.chomp, 'lib/lux-hammer')
+if ARGV.first == '--dir'
+  lib = $LOADED_FEATURES.grep(%r{/lux-hammer\.rb$}).last
+  puts File.expand_path('../..', lib)   # lib/lux-hammer.rb -> gem root
+  exit
+end
+
 Hammer.cli(ARGV)
 

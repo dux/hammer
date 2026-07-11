@@ -33,9 +33,10 @@ class Hammer
 
     attr_reader :jobs, :port, :root_dir
 
-    def initialize(root_klass, port:)
+    def initialize(root_klass, port:, pass: nil)
       @root_dir   = Dir.pwd   # Hammer.cli already chdir-ed to the Hammerfile dir
       @port       = port
+      @pass       = pass && !pass.to_s.empty? ? pass.to_s : nil
       @hammer_bin = begin
         File.realpath($PROGRAM_NAME)
       rescue Errno::ENOENT
@@ -61,10 +62,12 @@ class Hammer
 
     # ----- foreground service --------------------------------------------
 
-    # Run scheduler + web UI until SIGINT/SIGTERM. The scheduler owns the
-    # main thread (so Ctrl-C lands in the thread that is sleeping); the
-    # HTTP accept loop runs in a background thread. Trap handlers only
-    # flip a flag - no IO or locking is allowed inside a trap.
+    # Run scheduler + web UI until SIGINT/SIGTERM. Ticks on minute
+    # boundaries (or every second when a sub-minute interval job exists,
+    # see tick_step). The scheduler owns the main thread (so Ctrl-C
+    # lands in the thread that is sleeping); the HTTP accept loop runs
+    # in a background thread. Trap handlers only flip a flag - no IO or
+    # locking is allowed inside a trap.
     def run!
       ensure_single_instance!
       @stop = false
@@ -72,14 +75,15 @@ class Hammer
       trap('TERM') { @stop = true }
 
       save_state
+      @jobs.each_value { |job| watch_orphan(job) if job.running? }
       require_relative 'cron_web'
-      @web = CronWeb.new(self, port: @port).start
+      @web = CronWeb.new(self, port: @port, pass: @pass).start
       print_startup_summary
-      Shell.say "web ui: http://127.0.0.1:#{@port}", :cyan
+      Shell.say "web ui: http://127.0.0.1:#{@port}#{' (password protected)' if @pass}", :cyan
       Shell.say 'Ctrl-C to stop', :gray
 
       until @stop
-        tick = wait_for_minute or break
+        tick = wait_for_tick or break
         each_job_snapshot do |job|
           launch(job, tick, trigger: 'cron') if job.schedule.due?(tick, job.last_run)
         end
@@ -148,7 +152,12 @@ class Hammer
               @hammer_bin, job.path,
               in: File::NULL, out: log, err: log, chdir: @root_dir
             )
-            @mutex.synchronize { job.pid = pid }
+            # Persist the real child pid right away - it's what lets a
+            # restarted server find this run again if we die mid-flight.
+            @mutex.synchronize do
+              job.pid = pid
+              save_state
+            end
             _, status = Process.wait2(pid)
             dur = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
             log.puts "===== exit #{status.exitstatus.inspect} | #{format('%.1f', dur)}s ====="
@@ -203,7 +212,8 @@ class Hammer
         port:       @port,
         started_at: (@started_at ||= Time.now).to_i,
         jobs:       @jobs.transform_values do |j|
-          { last_run: j.last_run&.to_i, exit: j.exit_code, duration: j.duration, status: j.status }
+          { last_run: j.last_run&.to_i, exit: j.exit_code, duration: j.duration,
+            status: j.status, pid: (j.pid if j.pid.is_a?(Integer)) }
         end
       }
       FileUtils.mkdir_p(File.dirname(@state_path))
@@ -232,6 +242,18 @@ class Hammer
         job.exit_code = j['exit']
         job.duration  = j['duration']
         job.status    = j['status']
+        # A job saved as 'running' means the previous server went away
+        # mid-run. If its subprocess is still alive we keep reporting it
+        # as running (and the overlap guard keeps skipping new runs);
+        # otherwise the run's exit status is lost - mark it 'unknown'
+        # instead of leaving a stale 'running' badge forever.
+        next unless job.status == 'running'
+        if j['pid'] && process_alive?(j['pid'])
+          job.pid = j['pid']
+        else
+          job.pid    = nil
+          job.status = 'unknown'
+        end
       end
     end
 
@@ -253,7 +275,7 @@ class Hammer
             <array>
               <string>#{@hammer_bin}</string>
               <string>h:cron</string>
-              <string>--port=#{@port}</string>
+              <string>--port=#{@port}</string>#{@pass ? "\n    <string>--pass=#{@pass}</string>" : ''}
             </array>
             <key>WorkingDirectory</key><string>#{@root_dir}</string>
             <key>RunAtLoad</key><true/>
@@ -271,7 +293,7 @@ class Hammer
           Description=hammer h:cron job server (#{File.basename(@root_dir)})
 
           [Service]
-          ExecStart=#{@hammer_bin} h:cron --port=#{@port}
+          ExecStart=#{@hammer_bin} h:cron --port=#{@port}#{" --pass=#{@pass}" if @pass}
           WorkingDirectory=#{@root_dir}
           Restart=on-failure
 
@@ -309,18 +331,56 @@ class Hammer
     # file): kill(0) tells us whether that pid is still alive.
     def ensure_single_instance!
       return unless @saved_pid && @saved_pid != Process.pid
-      begin
-        Process.kill(0, @saved_pid)
-      rescue Errno::ESRCH, Errno::EPERM
-        return   # stale pid, fine to start
-      end
+      return unless process_alive?(@saved_pid)
       raise Hammer::Error, "h:cron already running (pid #{@saved_pid}) - stop it first"
     end
 
-    # Sleep in <=1s slices until the next minute boundary so Ctrl-C is
+    # kill(0) probes without signaling. EPERM means the pid exists but
+    # belongs to someone else - that still counts as alive. Best-effort:
+    # a recycled pid after reboot can false-positive, acceptable here.
+    def process_alive?(pid)
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    # Tick resolution: classic minute alignment, dropped to 1s when any
+    # interval job runs sub-minute (cron '10s') - those are the only
+    # schedules that can be due between minute boundaries.
+    def tick_step
+      sub_minute = @jobs.values.any? do |j|
+        j.schedule.interval && j.schedule.interval < 60
+      end
+      sub_minute ? 1 : 60
+    end
+
+    # This server restarted while a subprocess spawned by the previous
+    # one is still alive (restored from the state file). It is not our
+    # child, so wait2 is off the table - poll once a second until it
+    # disappears. Its exit status is lost, hence 'unknown'; the overlap
+    # guard keeps skipping new runs of the job until then.
+    def watch_orphan(job)
+      @threads << Thread.new do
+        sleep 1 while !@stop && process_alive?(job.pid)
+        unless @stop
+          @mutex.synchronize do
+            job.pid    = nil
+            job.status = 'unknown'
+            save_state
+          end
+          append_line(job, "[h:cron] orphaned run from previous server finished - exit status unknown")
+        end
+      end
+    end
+
+    # Sleep in <=1s slices until the next tick boundary so Ctrl-C is
     # honored within a second. Returns the boundary Time, or nil on stop.
-    def wait_for_minute
-      target = (Time.now.to_i / 60 + 1) * 60
+    def wait_for_tick
+      step   = tick_step
+      target = (Time.now.to_i / step + 1) * step
       while Time.now.to_i < target
         return nil if @stop
         sleep [target - Time.now.to_f, 1].min

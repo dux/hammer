@@ -84,11 +84,19 @@ class CronTest < Minitest::Test
   # -- interval mode -----------------------------------------------------
 
   def test_interval_parsing
+    assert_equal 10,     cron('10s').interval
     assert_equal 600,    cron('10m').interval
     assert_equal 7200,   cron('2h').interval
     assert_equal 86_400, cron('1d').interval
     assert cron('10m').interval?
     refute cron('* * * * *').interval?
+  end
+
+  def test_sub_minute_interval_due
+    c    = cron('10s')
+    tick = Time.local(2026, 7, 10, 12, 0, 20)
+    refute c.due?(tick, Time.local(2026, 7, 10, 12, 0, 15))   # 5s ago
+    assert c.due?(tick, Time.local(2026, 7, 10, 12, 0, 10))   # exactly 10s
   end
 
   def test_interval_due
