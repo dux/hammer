@@ -8,6 +8,9 @@ desc <<~TXT
   Namespaces:
     memory   persistent memory store (backs the Claude Code memory plugin)
     prompt   token-prefix prompt expander (UserPromptSubmit hook + CLI)
+
+  Commands:
+    usage    Claude, Codex, and Grok subscription usage (session + week table)
 TXT
 
 require 'fileutils'
@@ -15,10 +18,49 @@ require 'json'
 require 'pathname'
 require 'set'
 
+_llm_root = File.dirname(Hammer::Recipe.path('llm') || File.join(Hammer::Recipe::GEM_DIR, 'llm.rb'))
+require File.join(_llm_root, 'lib/llm/usage')
+
 STORE        ||= ENV['CLAUDE_MEMORY_STORE'] || File.expand_path('~/dev/skills/memory')
 VALID_TYPES  ||= %w[user feedback project reference].freeze
 
 FileUtils.mkdir_p(STORE)
+
+task :usage do
+  desc <<~D
+    Show subscription usage for Claude, Codex, and Grok in one table.
+
+    Default view lists session and weekly windows side by side.
+    Reads Codex via `codex app-server`, Grok from `~/.grok/logs/unified.jsonl`.
+    Claude has no local snapshot. Pass `month` for Claude extra-usage when enabled.
+  D
+  example 'llm usage'
+  example 'llm usage month'
+  example 'llm usage --json'
+  example 'llm usage --provider grok'
+
+  opt :json,     type: :boolean, default: false, desc: 'emit JSON'
+  opt :provider, desc: 'single provider (claude, codex, grok)'
+
+  proc do |opts|
+    period = opts[:args].first
+    providers = opts[:provider] ? [opts[:provider]] : nil
+    rows, notes, = LlmUsage.collect_rows(period: period, providers: providers)
+
+    if rows.empty?
+      notes.each { |note| say note, :yellow }
+      error 'no usage data (sign in to Claude, Codex, or Grok first)' if notes.empty?
+      error 'no usage data available'
+    end
+
+    if opts[:json]
+      puts JSON.generate(LlmUsage.rows_to_json(rows, period: period, notes: notes))
+    else
+      say LlmUsage.render_table(rows, period: period)
+      notes.each { |note| say note, :gray }
+    end
+  end
+end
 
 namespace :memory do
   # Helpers are defined inside the namespace block (class_eval'd on the
