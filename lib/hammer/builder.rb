@@ -45,6 +45,11 @@ class Hammer
       @klass.before(&block)
     end
 
+    # Options available on every command (see Hammer.global_opt).
+    def global_opt(name, **opts)
+      @klass.global_opt(name, **opts)
+    end
+
     # Opt out of auto `.env` loading in `Hammer.cli`. Default is on.
     def dotenv(flag = true)
       @klass.dotenv(flag)
@@ -75,7 +80,7 @@ class Hammer
   # still call `task`, `namespace`, and `before`. Delegates to whichever
   # Hammer subclass is currently being evaluated.
   module DSL
-    %i[task namespace before dotenv].each do |m|
+    %i[task namespace before dotenv global_opt].each do |m|
       define_method(m) do |*args, &block|
         target = Thread.current[:hammer_target]
         raise Hammer::Error, "`#{m}` called outside a Hammer context " \

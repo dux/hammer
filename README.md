@@ -274,10 +274,13 @@ Not supported: attached short form (`-p3000`), combined short flags
 For boolean options:
 
 ```
---verbose          # set to true
---no-verbose       # set to false (only if a default of true is in play)
+--verbose          # set to true (presence alone)
 -v                 # short alias if declared
+--no-reset         # also true if the opt is named :no_reset
 ```
+
+There is **no** auto `--no-X` negation. Name the flag what you mean
+(`:verbose`, `:no_reset`, `:force`).
 
 ### Per-type behavior
 
@@ -295,19 +298,20 @@ hammer build                    # opts[:env] = "dev"  (default)
 #### `:boolean`
 
 ```ruby
-opt :verbose, type: :boolean, alias: :v
-opt :cache,   type: :boolean, default: true
+opt :verbose,  type: :boolean, alias: :v
+opt :no_reset, type: :boolean
+opt :cache,    type: :boolean, default: true
 ```
 ```
-hammer build -v                 # opts[:verbose] = true
-hammer build --verbose          # opts[:verbose] = true
-hammer build --no-cache         # opts[:cache]   = false  (negates default)
-hammer build                    # opts[:cache]   = true   (default)
-                                # opts[:verbose] = nil    (no default)
+hammer build -v                 # opts[:verbose]  = true
+hammer build --verbose          # opts[:verbose]  = true
+hammer build --no-reset         # opts[:no_reset] = true  (name is the flag)
+hammer build                    # opts[:cache]    = true  (default)
+                                # opts[:verbose]  = nil   (no default)
 ```
 
-Booleans never consume a positional. `--no-X` only meaningfully overrides
-a `default: true`.
+Booleans never consume a positional. Presence → true; omitted → default
+(or nil). Use `--flag=false` only if you need an explicit false value.
 
 #### `:integer`
 
@@ -499,6 +503,72 @@ namespace :db do
   end
 end
 ```
+
+## Stdin, JSON input, and global options
+
+Every command receives **`opts[:stdin]`** automatically when stdin is a
+pipe (non-TTY) and non-empty; otherwise it is `nil`. Interactive TTYs are
+never consumed.
+
+```ruby
+task :count do
+  proc { |o| say "bytes=#{o[:stdin]&.bytesize || 0}" }
+end
+# cat file.txt | hammer count
+```
+
+### `type: :json` and `Hammer.prepare_json!`
+
+For JSON bodies, declare `type: :json` and (optionally) coerce in a
+`before` hook so pipes, `@file`, `-`, and inline JSON all land as a
+**Hash/Array** on the same key:
+
+```ruby
+global_opt :json, type: :json, desc: 'JSON body (inline, @file, -, or pipe)'
+before { |o| Hammer.prepare_json!(o) }   # fills o[:json] from stdin when unset
+
+task :create do
+  opt :name
+  proc do |o|
+    body = o[:json] || {}
+    body[:name] ||= o[:name]
+    # body is a Hash with symbol keys
+  end
+end
+```
+
+Supply the body any of these ways (equivalent when `prepare_json!` runs):
+
+```sh
+hammer create --json '{"name":"Ship"}'
+hammer create --json @payload.json
+cat payload.json | hammer create
+cat payload.json | hammer create --json -    # explicit stdin
+```
+
+Rules for `Hammer.prepare_json!(opts, key: :json)`:
+
+1. Already a Hash/Array → leave (symbolize keys).
+2. String → parse inline JSON, `@path`, or `-` (stdin).
+3. `nil` + stdin looks like `{` / `[` → parse stdin into `opts[key]`.
+4. Boolean left alone (legacy `opt :json, type: :boolean` output flags).
+
+`type: :json` **never** takes a bare positional (flag / file / pipe only),
+so it won't steal `REF` from `update REF`.
+
+### `global_opt`
+
+Register options once at root (or a namespace); every command under that
+scope accepts them. Shown under **Global options:** in help. Declared
+**after** per-task opts for positional fill order.
+
+```ruby
+global_opt :json, type: :json
+global_opt :as_json, type: :boolean, alias: :j, default: false,
+           desc: 'Force JSON on stdout'
+```
+
+Helpers: `Hammer.prepare_json!`, `Hammer.attach_stdin!`, `Hammer::Input.*`.
 
 `.env` and `.env.local` next to the `Hammerfile` are loaded
 automatically by the `hammer` binary - no `before` hook needed.
@@ -794,10 +864,10 @@ positionals become positional ARGV; kwargs become CLI flags:
 * `hammer 'db:users:list'` → `db:users:list`
 * `hammer :evaluate, 'puts 42'` → `evaluate "puts 42"` (positional ARGV)
 * `verbose: true` → `--verbose`
-* `no_cache: true` → `--no-cache` (underscores in the key become dashes)
+* `no_reset: true` → `--no-reset` (underscores in the key become dashes)
 * `dry_run: true` → `--dry-run`
 * `env: 'prod'` → `--env=prod`
-* `anything: false` → skipped (no-op; use `no_x: true` to negate)
+* `anything: false` → skipped (false flags are omitted)
 
 `MyCli.hammer 'db:users:list', verbose: true` also works at the
 class level, useful for tests and scripting.

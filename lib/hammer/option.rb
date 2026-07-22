@@ -47,20 +47,30 @@ class Hammer
       "--#{name.to_s.tr('_', '-')}"
     end
 
-    def negation
-      "--no-#{name.to_s.tr('_', '-')}"
-    end
-
     def cast(value)
       case type
       when :boolean then !!value && value != 'false' && value != '0'
       when :integer then Integer(value)
       when :float   then Float(value)
       when :array   then value.is_a?(Array) ? value : value.to_s.split(',')
+      when :json
+        # Hash/Array pass through. Strings may be inline JSON, @file, or "-"
+        # (stdin resolved later by Hammer::Input.prepare_json!). "@" and
+        # inline JSON are parsed here so opts[:x] is already a Hash in
+        # the handler when the flag is used.
+        return value if value.is_a?(Hash) || value.is_a?(Array)
+        s = value.to_s
+        return s if s == '-' || s.empty?
+        Hammer::Input.resolve_json_value(s, {}, source: switch)
       else value.to_s
       end
     rescue ArgumentError, TypeError
       raise Hammer::Parser::Error, "invalid #{type} value for --#{name}: #{value.inspect}"
+    end
+
+    # JSON bodies are flags / stdin / @file — never bare positionals.
+    def skip_positional_fill?
+      type == :json
     end
 
     def usage
@@ -81,9 +91,9 @@ class Hammer
 
     # Structured form for JSON export (`h:json`). The GUI maps `type`
     # to a form widget; `default`/`required`/`desc` decorate it. Mirrors
-    # the data behind `usage`. `negation` is only meaningful for booleans.
+    # the data behind `usage`.
     def to_h
-      h = {
+      {
         name:        name.to_s,
         type:        type.to_s,
         default:     default,
@@ -94,8 +104,6 @@ class Hammer
         aliases:     aliases,
         usage:       usage.strip
       }
-      h[:negation] = negation if boolean?
-      h
     end
   end
 end

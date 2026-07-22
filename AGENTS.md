@@ -38,7 +38,8 @@ usable as a library (`require 'lux-hammer'`, subclass `Hammer`, call
 bin/hammer                  # CLI entry point
 lib/lux-hammer.rb           # Entry - defines class Hammer and its DSL
 lib/hammer/shell.rb         # ANSI/IO helpers
-lib/hammer/option.rb        # One option definition
+lib/hammer/option.rb        # One option definition (types: string/boolean/integer/float/array/json)
+lib/hammer/input.rb         # opts[:stdin], prepare_json!, JSON @file / pipe helpers
 lib/hammer/parser.rb        # ARGV -> [positional, opts_hash]
 lib/hammer/command.rb       # One registered command (name, opts, alts, handler)
 lib/hammer/cron.rb          # `cron '<expr>'` schedule parser (cron/interval/@shortcut)
@@ -72,12 +73,19 @@ Inside a `task :name do ... end` block (CommandBuilder context):
   the brief shown in listings, full text renders in per-command help)
 * `example 'invocation example'` (callable many times)
 * `opt :name, type:, default:, alias:, desc:, req:` - any other kwarg
-  raises `Hammer::Error` ("unknown opt parameter(s)")
+  raises `Hammer::Error` ("unknown opt parameter(s)"). Types include
+  `:string`, `:boolean`, `:integer`, `:float`, `:array`, `:json`
+  (`:json` is flag/file/pipe only — never bare positional).
+* `global_opt :name, ...` - same kwargs as `opt`, available on every
+  command under the declaring class/namespace (help: "Global options").
 * `alt :other_name` (callable many times)
 * `needs :other_cmd, 'ns:cmd'` - prereqs run before the handler;
   resolved against root (same lookup as `hammer`), deduped per
   top-level `start` so each prereq fires at most once. Dedupe also
   spans `+`-chained segments. Unknown prereq raises `Hammer::Error`.
+* `opts[:stdin]` is always attached in `run_command` (piped non-TTY
+  body or `nil`). JSON body coercion is opt-in via
+  `Hammer.prepare_json!(opts)` (usually from `before`).
 * `cron '<expr>'` - schedule for the `h:cron` job server. Accepts
   5-field cron (`'*/10 * * * *'`), an interval (`'10s'`, `'10m'`,
   `'2h'`, `'1d'`, counted from the last run) or `@hourly` / `@daily` /
@@ -217,10 +225,12 @@ explicit ADR-level discussion. Keys:
   `> prog cmd --opt=val ARG` banner so it's visible which command was
   actually picked when fuzzy matching kicks in. Only options that
   differ from their default are listed; booleans render as `--flag`
-  / `--no-flag`. Help paths (`-h`, bare namespace) short-circuit
-  before the banner. Set `HAMMER_QUIET=1` to suppress the banner
-  globally - useful when a task writes machine-readable output to
-  stdout (e.g. a JSON-emitting Claude Code / Codex hook).
+  when true (no auto `--no-flag`). Help paths (`-h`, bare namespace)
+  short-circuit before the banner. Set `HAMMER_QUIET=1` to suppress
+  the banner globally - useful when a task writes machine-readable
+  output to stdout (e.g. a JSON-emitting Claude Code / Codex hook).
+  Boolean opts: presence of the switch/alias sets true; there is no
+  auto-negation from a `--no-` prefix.
 * There is **no per-level dispatch**. A namespace is a container, not a
   CLI of its own. Do not reintroduce `subclass.start(remaining_argv)`.
 * `start(argv)` is a two-step pipeline: `split_chain(argv)` (private)

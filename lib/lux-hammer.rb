@@ -1,4 +1,5 @@
 require_relative 'hammer/shell'
+require_relative 'hammer/input'
 require_relative 'hammer/option'
 require_relative 'hammer/parser'
 require_relative 'hammer/command'
@@ -49,12 +50,23 @@ class Hammer
   # Gem version, read once from the bundled .version file.
   VERSION ||= File.read(File.expand_path('../.version', __dir__)).strip
 
+  # Convenience aliases so recipes can write `Hammer.prepare_json!(opts)`
+  # without the Input module path. See Hammer::Input.
+  def self.prepare_json!(opts, key: :json)
+    Input.prepare_json!(opts, key: key)
+  end
+
+  def self.attach_stdin!(opts)
+    Input.attach_stdin!(opts)
+  end
+
   class << self
     def inherited(sub)
       super
       sub.instance_variable_set(:@commands, {})
       sub.instance_variable_set(:@namespaces, {})
       sub.instance_variable_set(:@before_hooks, [])
+      sub.instance_variable_set(:@global_options, [])
       sub.instance_variable_set(:@parent, nil)
       sub.instance_variable_set(:@program_name, nil)
       sub.instance_variable_set(:@app_desc, nil)
@@ -230,6 +242,7 @@ class Hammer
     # outer -> inner, once per top-level `start` (prereqs don't re-trigger).
     #
     #   before { |opts| Dotenv.load }
+    #   before { |opts| Hammer::Input.prepare_json!(opts) }
     #   namespace :db do
     #     before { hammer :env }
     #     task :migrate do ... end
@@ -240,6 +253,52 @@ class Hammer
 
     def before_hooks
       @before_hooks
+    end
+
+    # Options available on every command under this class (and children).
+    # Declared once at root (or a namespace); merged after per-task opts so
+    # positionals still fill task params first. type: :json never takes
+    # positionals regardless.
+    #
+    #   global_opt :json, type: :json, desc: 'JSON body (inline, @file, pipe)'
+    #   global_opt :as_json, type: :boolean, alias: :j, default: false
+    def global_opt(name, **o)
+      (@global_options ||= []) << Option.new(name, **o)
+    end
+
+    def global_options
+      @global_options || []
+    end
+
+    # Root -> self chain of global_opt declarations (outer first).
+    def collected_global_options
+      ancestor_chain.flat_map { |k| k.global_options }
+    end
+
+    # Per-task options + globals. Globals last so bare positionals bind to
+    # the task's own opts first. Short aliases finalized on the combined set.
+    def effective_options(cmd)
+      extras = collected_global_options
+      return cmd.options if extras.empty?
+
+      merged = cmd.options + extras
+      finalize_option_list!(merged)
+      merged
+    end
+
+    def finalize_option_list!(options)
+      claimed = ['-h']
+      options.each do |o|
+        o.aliases.each { |a| claimed << a if a.length == 2 && a.start_with?('-') && a[1] != '-' }
+      end
+      options.each do |o|
+        next if o.aliases.any? { |a| a.length == 2 && a.start_with?('-') && a[1] != '-' }
+        short = "-#{o.name.to_s[0]}"
+        next if claimed.include?(short)
+        o.aliases << short
+        claimed << short
+      end
+      options
     end
 
     # Toggle auto-loading of `.env` / `.env.local` for the `hammer`
@@ -551,16 +610,17 @@ class Hammer
     #   MyCli.hammer :eval, 'puts 42'             -> start(["eval", "puts 42"])
     #   MyCli.hammer :build, env: 'prod'          -> start(["build", "--env=prod"])
     #   MyCli.hammer :build, verbose: true        -> start(["build", "--verbose"])
-    #   MyCli.hammer :build, no_cache: true       -> start(["build", "--no-cache"])
-    #   MyCli.hammer :build, cache: false         -> skipped (no-op)
+    #   MyCli.hammer :build, no_reset: true       -> start(["build", "--no-reset"])
+    #   MyCli.hammer :build, cache: false         -> skipped (false flags are omitted)
     #
     # Symbols are single-segment names; pass a string with colons for
     # namespaced paths. Trailing positionals become positional ARGV.
-    # Underscores in option keys become dashes in flags.
+    # Underscores in option keys become dashes in flags. Boolean presence
+    # is the only truth: there is no auto `--no-X` negation.
     def hammer(name, *args, **opts)
       argv = [name.to_s, *args.map(&:to_s)]
       opts.each do |k, v|
-        next if v == false
+        next if v == false || v.nil?
         flag = "--#{k.to_s.tr('_', '-')}"
         if v == true
           argv << flag
@@ -627,9 +687,13 @@ class Hammer
       # stop-marker, it short-circuits to per-command help.
       return print_command_help(cmd, full) if help_requested?(argv)
 
-      positional, opts = Parser.new(cmd.options).parse(argv)
+      options = effective_options(cmd)
+      positional, opts = Parser.new(options).parse(argv)
       opts[:args] = positional
-      print_run_banner(cmd, full || cmd.name, positional, opts) unless quiet || ENV['HAMMER_QUIET']
+      # Always attach piped stdin (nil when TTY / empty). Recipes that want
+      # JSON body handling call Hammer::Input.prepare_json! in a before hook.
+      Hammer::Input.attach_stdin!(opts)
+      print_run_banner(cmd, full || cmd.name, positional, opts, options: options) unless quiet || ENV['HAMMER_QUIET']
       instance = new
       run_before_hooks(instance, opts)
       run_needs(cmd)
@@ -648,16 +712,25 @@ class Hammer
     # Print a gray "> prog cmd --opt=val ARG" banner before a command
     # runs. Helps see what was actually picked when fuzzy matching
     # resolved a partial name. Only opts that differ from their default
-    # are shown; booleans render as `--flag` / `--no-flag`.
-    def print_run_banner(cmd, full, positional, opts)
+    # are shown; booleans render as `--flag` when true.
+    def print_run_banner(cmd, full, positional, opts, options: nil)
+      options ||= effective_options(cmd)
       parts = ["#{program_name} #{full}"]
-      cmd.options.each do |o|
+      options.each do |o|
         val = opts[o.name]
         next if val.nil? || val == o.default
         if o.boolean?
-          parts << (val ? "--#{o.name}" : "--no-#{o.name}")
+          parts << o.switch if val
         else
-          parts << "--#{o.name}=#{val.is_a?(Array) ? val.join(',') : val}"
+          rendered =
+            if o.type == :json || val.is_a?(Hash)
+              val.respond_to?(:to_json) ? val.to_json : val.inspect
+            elsif val.is_a?(Array)
+              val.join(',')
+            else
+              val
+            end
+          parts << "#{o.switch}=#{rendered}"
         end
       end
       parts.concat(positional)
@@ -891,20 +964,24 @@ class Hammer
 
     # " URL [ENV] [OPTIONS]" - shows the positional-fill names for
     # declared non-boolean opts (required bare, optional bracketed), plus
-    # a generic [OPTIONS] tail if any flags exist.
+    # a generic [OPTIONS] tail if any flags exist. type: :json and other
+    # skip_positional_fill? opts are flag-only (not listed as positionals).
     def usage_signature(cmd)
-      pos = cmd.options.reject(&:boolean?).map { |o|
+      options = effective_options(cmd)
+      pos = options.reject { |o| o.boolean? || o.skip_positional_fill? }.map { |o|
         name = o.name.to_s.upcase
         o.required ? name : "[#{name}]"
       }
       out = pos.join(' ')
       out = "#{out} ".lstrip unless out.empty?
-      out += '[OPTIONS]' unless cmd.options.empty?
+      out += '[OPTIONS]' unless options.empty?
       out.empty? ? '' : " #{out}"
     end
 
     def print_command_help(cmd, full = nil)
       full ||= cmd.name
+      local  = cmd.options
+      global = collected_global_options
       Shell.say "Usage: #{program_name} #{full}#{usage_signature(cmd)}", :cyan
       cmd.desc.each_line do |line|
         stripped = line.chomp
@@ -912,10 +989,15 @@ class Hammer
       end unless cmd.desc.empty?
       Shell.say "  alias: #{cmd.alts.join(', ')}" unless cmd.alts.empty?
       Shell.say "  cron: #{cmd.cron}" if cmd.cron
-      unless cmd.options.empty?
+      unless local.empty?
         Shell.say ''
         Shell.say 'Options:', :yellow
-        cmd.options.each { |o| Shell.say "  #{o.usage}" }
+        local.each { |o| Shell.say "  #{o.usage}" }
+      end
+      unless global.empty?
+        Shell.say ''
+        Shell.say 'Global options:', :yellow
+        global.each { |o| Shell.say "  #{o.usage}" }
       end
       unless cmd.examples.empty?
         Shell.say ''

@@ -5,11 +5,10 @@ class Hammer
     Error ||= Class.new(StandardError)
 
     def initialize(options)
-      @options    = options
-      @by_switch  = {}
+      @options   = options
+      @by_switch = {}
       options.each do |opt|
         register_switch(opt.switch, opt)
-        register_switch(opt.negation, opt) if opt.boolean?
         opt.aliases.each { |a| register_switch(a, opt) }
       end
     end
@@ -31,11 +30,7 @@ class Hammer
         if token.start_with?('--') && token.include?('=')
           key, val = token.split('=', 2)
           opt = lookup!(key)
-          if opt.boolean? && key.start_with?('--no-')
-            values[opt.name] = !opt.cast(val)   # `--no-x=false` -> true
-          else
-            values[opt.name] = opt.cast(val)
-          end
+          values[opt.name] = opt.cast(val)
           i += 1
           next
         end
@@ -43,7 +38,8 @@ class Hammer
         if @by_switch.key?(token)
           opt = @by_switch[token]
           if opt.boolean?
-            values[opt.name] = !token.start_with?('--no-')
+            # Presence alone is enough — the flag is true regardless of name.
+            values[opt.name] = true
             i += 1
           else
             val = argv[i + 1]
@@ -74,12 +70,13 @@ class Hammer
       end
 
       # Fill un-set non-boolean opts from positional args in declaration
-      # order. Booleans always need an explicit flag. Scalars take one
-      # positional each; an :array opt slurps whatever's left, so it's
-      # filled last and never starves a later-declared scalar opt.
+      # order. Booleans always need an explicit flag. type: :json is flag/
+      # stdin only (skip_positional_fill?). Scalars take one positional
+      # each; an :array opt slurps whatever's left, so it's filled last
+      # and never starves a later-declared scalar opt.
       array_opt = nil
       @options.each do |opt|
-        next if opt.boolean? || values.key?(opt.name)
+        next if opt.boolean? || opt.skip_positional_fill? || values.key?(opt.name)
         if opt.type == :array
           array_opt = opt
           next
@@ -102,7 +99,7 @@ class Hammer
     private
 
     # Map a flag string to its option, refusing silent shadowing when two
-    # options would claim the same switch/negation/alias.
+    # options would claim the same switch/alias.
     def register_switch(flag, opt)
       if (prev = @by_switch[flag]) && prev != opt
         raise Error, "flag #{flag} claimed by both :#{prev.name} and :#{opt.name}"

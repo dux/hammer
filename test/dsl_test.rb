@@ -107,11 +107,12 @@ class DslTest < Minitest::Test
       end
     end
     capture { cli.start(%w[x --env=prod --loud foo]) }
-    assert_equal [:env, :loud, :args], seen.keys
+    assert_equal [:env, :loud, :args, :stdin], seen.keys
     assert(seen.keys.all? { |k| k.is_a?(Symbol) })
     assert_equal 'prod', seen[:env]
     assert_equal true,   seen[:loud]
     assert_equal ['foo'], seen[:args]
+    assert_nil seen[:stdin]
   end
 
   def test_block_must_end_with_proc
@@ -491,16 +492,16 @@ class DslTest < Minitest::Test
     assert_equal true,   captured[:loud]
   end
 
-  def test_hammer_no_prefix_opt_emits_negation
+  def test_hammer_no_prefix_opt_is_own_flag
     captured = nil
     cli = build_cli do
       task :show do
-        opt :cache, type: :boolean, default: true
-        proc { |opts| captured = opts[:cache] }
+        opt :no_reset, type: :boolean
+        proc { |opts| captured = opts[:no_reset] }
       end
     end
-    capture { cli.hammer :show, no_cache: true }
-    assert_equal false, captured
+    capture { cli.hammer :show, no_reset: true }
+    assert_equal true, captured
   end
 
   def test_hammer_false_opt_is_noop
