@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
+require 'date'
 require 'fileutils'
 require 'json'
+require 'net/http'
 require 'open3'
 require 'shellwords'
 require 'time'
+require 'uri'
 
 module LlmUsage
   UsageRow = Struct.new(
@@ -17,10 +20,30 @@ module LlmUsage
     :month_reset,
     keyword_init: true
   )
+  TokenRow = Struct.new(
+    :provider,
+    :model,
+    :day_tokens,
+    :week_tokens,
+    :month_tokens,
+    keyword_init: true
+  )
 
   CACHE_TTL       ||= 180
   CACHE_DIR       ||= File.expand_path('~/.cache/llm')
   GROK_LOG_PATH   ||= File.expand_path('~/.grok/logs/unified.jsonl')
+  GROK_SESSION_GLOB ||= File.expand_path('~/.grok/sessions/**/signals.json')
+  GROK_SUMMARY_GLOB ||= File.expand_path('~/.grok/sessions/**/summary.json')
+  CLAUDE_SESSION_GLOB ||= File.expand_path('~/.claude/projects/**/*.jsonl')
+  # Written by the statusline hook (~/.claude/statusline-command.sh) from its
+  # `rate_limits` input; mtime is the observation time.
+  CLAUDE_LIMITS_PATH ||= File.expand_path('~/.cache/llm/claude-limits.json')
+  # Live fallback + the only source of `extra_usage` (the month view).
+  CLAUDE_USAGE_URL ||= 'https://api.anthropic.com/api/oauth/usage'
+  CLAUDE_OAUTH_BETA ||= 'oauth-2025-04-20'
+  CLAUDE_KEYCHAIN_SERVICE ||= 'Claude Code-credentials'
+  CLAUDE_CREDENTIALS_PATH ||= File.expand_path('~/.claude/.credentials.json')
+  CODEX_SESSION_GLOB ||= File.expand_path('~/.codex/sessions/**/rollout-*.jsonl')
   CODEX_INIT_RPC  ||= '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"llm-usage","version":"1.0"}}}'
   CODEX_LIMITS_RPC ||= '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}'
   module_function
@@ -32,9 +55,10 @@ module LlmUsage
     label = period_label(period)
 
     if wanted.include?(:claude)
-      data, note = fetch_cached(:claude, cache) { fetch_claude_usage }
-      notes << note if note
-      notes << 'claude: month billing requires OAuth API (not available locally)' if label == 'month'
+      # The snapshot path is deliberately uncached: it's one small local file,
+      # and caching would freeze the staleness note. Only the API call caches.
+      data, note = fetch_claude_usage(period: label, cache: cache, now: now)
+      notes << note unless note.nil? || note.empty?
       rows.concat(parse_claude(data, now: now)) if data
     end
 
@@ -59,7 +83,7 @@ module LlmUsage
     return '' if rows.empty?
 
     headers = table_headers(period)
-    widths = column_widths(rows, headers)
+    widths = column_widths(rows, headers, period: period)
     lines = []
     lines << format_row(headers, widths, align: headers.map { :left })
     rows.each do |row|
@@ -68,17 +92,172 @@ module LlmUsage
     lines.join("\n")
   end
 
-  def rows_to_json(rows, period: nil, notes: [])
+  def render_token_table(rows)
+    return '' if rows.empty?
+
+    headers = ['Provider', 'Model', 'day (mil)', 'week (mil)', 'month (mil)']
+    cells = rows.map do |row|
+      [
+        row.provider,
+        row.model,
+        format_tokens(row.day_tokens),
+        format_tokens(row.week_tokens),
+        format_tokens(row.month_tokens)
+      ]
+    end
+    totals = rows.each_with_object(day: 0, week: 0, month: 0) do |row, sum|
+      sum[:day] += row.day_tokens.to_i
+      sum[:week] += row.week_tokens.to_i
+      sum[:month] += row.month_tokens.to_i
+    end
+    total = [
+      'Total',
+      '',
+      format_tokens(totals[:day]),
+      format_tokens(totals[:week]),
+      format_tokens(totals[:month])
+    ]
+    widths = cell_widths([headers] + cells + [total])
+    lines = [format_row(headers, widths, align: headers.map { :left })]
+    alignment = [:left, :left, :right, :right, :right]
+    cells.each { |line| lines << format_row(line, widths, align: alignment) }
+    lines << (' ' * (widths[0] + widths[1] + 4)) + ('-' * (widths[2..].sum + 4))
+    lines << format_row(total, widths, align: alignment)
+    lines.join("\n")
+  end
+
+  def rows_to_json(rows, period: nil, notes: [], token_rows: [])
     {
       period: period_label(period),
       rows: rows.map { |row| row_to_hash(row, period: period) },
+      token_usage: token_rows.map { |row| token_row_to_hash(row) },
       notes: notes
     }
+  end
+
+  def collect_token_rows(providers: nil, now: Time.now)
+    wanted = normalize_providers(providers)
+    rows = []
+    rows.concat(aggregate_claude_tokens(now: now)) if wanted.include?(:claude)
+    rows.concat(aggregate_codex_tokens(now: now)) if wanted.include?(:codex)
+    rows.concat(aggregate_grok_tokens(now: now)) if wanted.include?(:grok)
+    rows.sort_by { |row| [row.provider, row.model] }
+  end
+
+  def aggregate_codex_tokens(paths: nil, now: Time.now)
+    totals = token_totals
+    starts = calendar_period_starts(now)
+    session_paths(paths || Dir.glob(CODEX_SESSION_GLOB)).each do |path|
+      model = nil
+      File.foreach(path) do |line|
+        data = JSON.parse(line)
+        payload = data['payload'] || {}
+        model = payload['model'] if data['type'] == 'turn_context' && payload['model']
+        next unless payload['type'] == 'token_count' && model
+
+        usage = payload.dig('info', 'last_token_usage')
+        add_token_total(totals, model, data['timestamp'], usage&.dig('total_tokens'), starts, now)
+      rescue JSON::ParserError
+        next
+      end
+    end
+    build_token_rows('codex', totals)
+  end
+
+  def aggregate_claude_tokens(paths: nil, now: Time.now)
+    entries = {}
+    session_paths(paths || Dir.glob(CLAUDE_SESSION_GLOB)).each do |path|
+      File.foreach(path) do |line|
+        data = JSON.parse(line)
+        message = data['message'] || {}
+        usage = message['usage']
+        model = message['model']
+        next unless usage.is_a?(Hash) && model && model != '<synthetic>'
+
+        total = claude_token_total(usage)
+        key = message['id'] || data['uuid'] || [path, data['timestamp'], total]
+        current = entries[key]
+        if !current || total > current[:total]
+          entries[key] = { model: model, at: data['timestamp'], total: total }
+        end
+      rescue JSON::ParserError
+        next
+      end
+    end
+
+    totals = token_totals
+    starts = calendar_period_starts(now)
+    entries.each_value do |entry|
+      add_token_total(totals, entry[:model], entry[:at], entry[:total], starts, now)
+    end
+    build_token_rows('claude', totals)
+  end
+
+  # Sum actual API tokens from unified.jsonl inference events.
+  # Session signals.json only stores current context size (snapshot), not
+  # cumulative usage — that undercounted by an order of magnitude.
+  def aggregate_grok_tokens(log_path: nil, model_map: nil, now: Time.now)
+    path = log_path || GROK_LOG_PATH
+    return [] unless File.file?(path)
+
+    totals = token_totals
+    starts = calendar_period_starts(now)
+    sid_models = model_map || grok_session_model_map
+
+    File.foreach(path) do |line|
+      data = JSON.parse(line)
+      next unless data['msg'] == 'shell.turn.inference_done'
+
+      ctx = data['ctx'] || {}
+      tokens = ctx['prompt_tokens'].to_i + ctx['completion_tokens'].to_i
+      next unless tokens.positive?
+
+      model = sid_models[data['sid']] || 'unknown'
+      add_token_total(totals, model, data['ts'], tokens, starts, now)
+    rescue JSON::ParserError
+      next
+    end
+    build_token_rows('grok', totals)
+  end
+
+  def grok_session_model_map(paths: nil)
+    map = {}
+    # Prefer signals.json; fall back to summary.json (active sessions often
+    # write summary before signals).
+    files = if paths
+              session_paths(paths)
+            else
+              session_paths(Dir.glob(GROK_SESSION_GLOB) + Dir.glob(GROK_SUMMARY_GLOB))
+            end
+
+    files.each do |path|
+      data = read_json(path) || {}
+      model = if File.basename(path) == 'signals.json'
+                summary = read_json(File.join(File.dirname(path), 'summary.json')) || {}
+                data['primaryModelId'] || summary['current_model_id']
+              else
+                data['current_model_id'] || data['primaryModelId']
+              end
+      next unless model
+
+      sid = File.basename(File.dirname(path))
+      # signals win over summary if both exist
+      next if map.key?(sid) && File.basename(path) == 'summary.json'
+
+      map[sid] = model
+    end
+    map
   end
 
   def format_pct(value)
     return '-' if value.nil?
     "#{value.round}%"
+  end
+
+  def format_tokens(value)
+    whole, fraction = format('%.1f', value.to_i / 1_000_000.0).split('.')
+    grouped = whole.reverse.gsub(/(\d{3})(?=\d)/, '\1_').reverse
+    "#{grouped}.#{fraction}"
   end
 
   def format_reset_short(at, now: Time.now)
@@ -212,8 +391,99 @@ module LlmUsage
     )
   end
 
-  def fetch_claude_usage
-    [nil, 'claude: no local snapshot']
+  # The statusline snapshot carries five_hour/seven_day but no `extra_usage`,
+  # so the month view has to go to the OAuth API. The default view prefers the
+  # snapshot (instant, offline, no token) and only calls out when it's absent.
+  def fetch_claude_usage(period: 'default', cache: true, now: Time.now, path: CLAUDE_LIMITS_PATH)
+    return fetch_cached(:claude, cache) { fetch_claude_oauth_usage } if period == 'month'
+
+    data, note = fetch_claude_snapshot(now: now, path: path)
+    return [data, note] if data
+
+    api_data, api_note = fetch_cached(:claude, cache) { fetch_claude_oauth_usage }
+    return [api_data, api_note] if api_data
+
+    [nil, [note, api_note].compact.join('; ')]
+  end
+
+  def fetch_claude_snapshot(now: Time.now, path: CLAUDE_LIMITS_PATH)
+    snapshot = read_json(path)
+    return [nil, 'claude: no local snapshot (statusline writer not installed)'] unless snapshot.is_a?(Hash)
+
+    data = normalize_claude_limits(snapshot, now: now)
+    return [nil, 'claude: snapshot has no live windows'] if data.empty?
+
+    age = now - File.mtime(path)
+    note = age >= 300 ? format_age_note('claude: snapshot from', age) : nil
+    [data, note]
+  end
+
+  # Same payload Claude Code's own /usage reads: five_hour, seven_day,
+  # seven_day_opus/_sonnet and extra_usage, already in parse_claude's shape.
+  def fetch_claude_oauth_usage(now: Time.now)
+    token = claude_oauth_token(now: now)
+    return [nil, 'claude: no usable OAuth token (run `claude` to sign in or refresh)'] unless token
+
+    uri = URI(CLAUDE_USAGE_URL)
+    response = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 3, read_timeout: 5) do |http|
+      http.get(uri.request_uri, 'Authorization' => "Bearer #{token}", 'anthropic-beta' => CLAUDE_OAUTH_BETA)
+    end
+    return [nil, "claude: usage API returned #{response.code}"] unless response.is_a?(Net::HTTPSuccess)
+
+    data = JSON.parse(response.body)
+    return [nil, 'claude: usage API returned no windows'] unless data.is_a?(Hash)
+
+    [data, nil]
+  rescue JSON::ParserError
+    [nil, 'claude: usage API returned malformed JSON']
+  rescue StandardError => e
+    [nil, "claude: usage API unreachable (#{e.message})"]
+  end
+
+  # Credentials file (Linux) first, then the macOS keychain. An expired token
+  # is treated as absent rather than refreshed here — that's Claude Code's job,
+  # and refreshing behind its back would invalidate its copy.
+  def claude_oauth_token(now: Time.now, path: CLAUDE_CREDENTIALS_PATH)
+    creds = read_json(path) || claude_keychain_credentials
+    oauth = creds.is_a?(Hash) ? creds['claudeAiOauth'] : nil
+    return nil unless oauth.is_a?(Hash)
+
+    token = oauth['accessToken']
+    return nil if token.nil? || token.empty?
+
+    expires_at = oauth['expiresAt']
+    return nil if expires_at && Time.at(expires_at.to_i / 1000) <= now
+
+    token
+  end
+
+  def claude_keychain_credentials
+    out, status = Open3.capture2('security', 'find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w')
+    return nil unless status.success?
+
+    JSON.parse(out)
+  rescue JSON::ParserError, Errno::ENOENT
+    nil
+  end
+
+  # Statusline `rate_limits` -> the shape parse_claude reads. Windows whose
+  # reset time has already passed are dropped: the window rolled over, so the
+  # recorded percentage no longer describes anything.
+  def normalize_claude_limits(snapshot, now: Time.now)
+    return {} unless snapshot.is_a?(Hash)
+
+    %w[five_hour seven_day seven_day_opus seven_day_sonnet].each_with_object({}) do |key, out|
+      window = snapshot[key]
+      next unless window.is_a?(Hash)
+
+      resets_at = parse_time(window['resets_at'])
+      next if resets_at.nil? || resets_at <= now
+
+      out[key] = {
+        'utilization' => window['used_percentage'] || window['utilization'],
+        'resets_at' => window['resets_at']
+      }
+    end
   end
 
   def fetch_codex_usage
@@ -393,9 +663,9 @@ module LlmUsage
 
   def table_headers(period)
     if period_label(period) == 'month'
-      %w[Name month\ util month\ reset]
+      %w[Name month\ utilization month\ reset]
     else
-      %w[Name session\ util session\ reset week\ util week\ reset]
+      %w[Name session\ utilization session\ reset week\ utilization week\ reset]
     end
   end
 
@@ -409,7 +679,8 @@ module LlmUsage
 
   def row_to_hash(row, period: nil)
     if period_label(period) == 'month'
-      { name: row.name, month_util: row.month_pct, month_reset: row.month_reset }
+      # Mirror row_cells: providers with no month window render '-', not null.
+      { name: row.name, month_util: row.month_pct || '-', month_reset: row.month_reset || '-' }
     else
       {
         name: row.name,
@@ -421,11 +692,12 @@ module LlmUsage
     end
   end
 
-  def column_widths(rows, headers)
-    cells = [headers] + rows.map { |row| row_cells(row, nil) }
-    headers.each_index.map do |i|
-      cells.map { |line| line[i].to_s.length }.max
-    end
+  def column_widths(rows, headers, period: nil)
+    cell_widths([headers] + rows.map { |row| row_cells(row, period) })
+  end
+
+  def cell_widths(cells)
+    cells.first.each_index.map { |i| cells.map { |line| line[i].to_s.length }.max }
   end
 
   def format_row(cells, widths, align: nil)
@@ -452,6 +724,71 @@ module LlmUsage
     end
   rescue ArgumentError
     nil
+  end
+
+  def calendar_period_starts(now)
+    day_date = Date.new(now.year, now.month, now.day)
+    week_date = day_date - ((day_date.wday + 6) % 7)
+    month_date = Date.new(now.year, now.month, 1)
+    {
+      day: calendar_midnight(day_date, now),
+      week: calendar_midnight(week_date, now),
+      month: calendar_midnight(month_date, now)
+    }
+  end
+
+  def calendar_midnight(date, now)
+    if now.utc?
+      Time.utc(date.year, date.month, date.day)
+    else
+      Time.new(date.year, date.month, date.day, 0, 0, 0, now.utc_offset)
+    end
+  end
+
+  def session_paths(paths)
+    Array(paths).reject { |path| File.basename(path).include?('.tmp.') }
+  end
+
+  def token_totals
+    Hash.new { |hash, model| hash[model] = { day: 0, week: 0, month: 0 } }
+  end
+
+  def add_token_total(totals, model, at, value, starts, now)
+    timestamp = parse_time(at)
+    count = value.to_i
+    return unless timestamp && timestamp <= now && count.positive?
+
+    totals[model][:month] += count if timestamp >= starts[:month]
+    totals[model][:week] += count if timestamp >= starts[:week]
+    totals[model][:day] += count if timestamp >= starts[:day]
+  end
+
+  def build_token_rows(provider, totals)
+    totals.map do |model, periods|
+      TokenRow.new(
+        provider: provider,
+        model: model,
+        day_tokens: periods[:day],
+        week_tokens: periods[:week],
+        month_tokens: periods[:month]
+      )
+    end.sort_by(&:model)
+  end
+
+  def claude_token_total(usage)
+    %w[input_tokens cache_creation_input_tokens cache_read_input_tokens output_tokens].sum do |key|
+      usage[key].to_i
+    end
+  end
+
+  def token_row_to_hash(row)
+    {
+      provider: row.provider,
+      model: row.model,
+      day_tokens: row.day_tokens,
+      week_tokens: row.week_tokens,
+      month_tokens: row.month_tokens
+    }
   end
 
   def window_pct(window)

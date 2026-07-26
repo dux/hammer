@@ -10,7 +10,7 @@ desc <<~TXT
     prompt   token-prefix prompt expander (UserPromptSubmit hook + CLI)
 
   Commands:
-    usage    Claude, Codex, and Grok subscription usage (session + week table)
+    usage    subscription limits and per-model token usage
 TXT
 
 require 'fileutils'
@@ -28,35 +28,48 @@ FileUtils.mkdir_p(STORE)
 
 task :usage do
   desc <<~D
-    Show subscription usage for Claude, Codex, and Grok in one table.
+    Show subscription limits and per-model token usage for Claude, Codex, and Grok.
 
     Default view lists session and weekly windows side by side.
-    Reads Codex via `codex app-server`, Grok from `~/.grok/logs/unified.jsonl`.
-    Claude has no local snapshot. Pass `month` for Claude extra-usage when enabled.
+    Local Claude, Codex, and Grok sessions provide calendar day, week, and month token totals.
+    Reads Codex via `codex app-server`; Grok billing + tokens from `~/.grok/logs/unified.jsonl`
+    (inference_done events). Claude 5h/week windows come from the statusline snapshot at
+    `~/.cache/llm/claude-limits.json`, falling back to the OAuth usage API. `month` shows
+    Claude extra-usage credits (API only, and only when you've enabled them).
   D
   example 'llm usage'
   example 'llm usage month'
   example 'llm usage --json'
   example 'llm usage --provider grok'
 
+  # :period is declared first on purpose — the parser fills un-set scalar opts
+  # from positionals in declaration order, so `llm usage month` must reach
+  # :period before :provider can claim it.
+  opt :period,   desc: 'window to show (week, month)', placeholder: 'week|month'
   opt :json,     type: :boolean, default: false, desc: 'emit JSON'
   opt :provider, desc: 'single provider (claude, codex, grok)'
 
   proc do |opts|
-    period = opts[:args].first
+    period = opts[:period]
     providers = opts[:provider] ? [opts[:provider]] : nil
     rows, notes, = LlmUsage.collect_rows(period: period, providers: providers)
+    token_rows = LlmUsage.collect_token_rows(providers: providers)
 
-    if rows.empty?
+    if rows.empty? && token_rows.empty?
       notes.each { |note| say note, :yellow }
       error 'no usage data (sign in to Claude, Codex, or Grok first)' if notes.empty?
       error 'no usage data available'
     end
 
     if opts[:json]
-      puts JSON.generate(LlmUsage.rows_to_json(rows, period: period, notes: notes))
+      puts JSON.generate(
+        LlmUsage.rows_to_json(rows, period: period, notes: notes, token_rows: token_rows)
+      )
     else
-      say LlmUsage.render_table(rows, period: period)
+      tables = []
+      tables << LlmUsage.render_table(rows, period: period) unless rows.empty?
+      tables << LlmUsage.render_token_table(token_rows) unless token_rows.empty?
+      say tables.join("\n\n")
       notes.each { |note| say note, :gray }
     end
   end
