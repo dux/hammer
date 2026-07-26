@@ -18,10 +18,12 @@ require 'json'
 require 'pathname'
 require 'set'
 
-_llm_root = File.dirname(Hammer::Recipe.path('llm') || File.join(Hammer::Recipe::GEM_DIR, 'llm.rb'))
+# Resolve next to this recipe file (realpath so PATH symlinks to a dev
+# checkout still load matching lib/, not an older installed gem copy).
+_llm_root = File.dirname(File.realpath(__FILE__))
 require File.join(_llm_root, 'lib/llm/usage')
 
-STORE        ||= ENV['CLAUDE_MEMORY_STORE'] || File.expand_path('~/dev/skills/memory')
+STORE        ||= ENV['CLAUDE_MEMORY_STORE'] || File.expand_path('~/dev/ai/memory')
 VALID_TYPES  ||= %w[user feedback project reference].freeze
 
 FileUtils.mkdir_p(STORE)
@@ -152,15 +154,21 @@ namespace :memory do
       Memory types: user, feedback, project, reference.
     DESC
     example %(echo "deep Go expertise, new to React" | llm memory write user-role --type=user --description="user profile")
+    # :name first — the parser fills scalar opts from positionals in
+    # declaration order, so without it `llm memory write foo --type=user`
+    # lands "foo" in :description instead of the memory name.
+    opt :name,        desc: 'memory name (slug)'
     opt :type,        desc: 'memory type (user|feedback|project|reference)', req: true
     opt :description, desc: 'one-line summary stored in frontmatter'
 
     proc do |opts|
-      name = opts[:args].first
+      name = opts[:name]
       error 'usage: llm memory write <name> --type=<type> [--description="..."] < body' unless name
       error "unknown type: #{opts[:type]} (valid: #{VALID_TYPES.join(', ')})" unless VALID_TYPES.include?(opts[:type])
 
-      body = $stdin.read
+      # opts[:stdin], not $stdin.read — hammer drains piped stdin into opts
+      # before the handler runs, so a direct read comes back empty.
+      body = opts[:stdin].to_s
       error 'body is empty (pipe content on stdin)' if body.strip.empty?
 
       path = memory_path(name)
@@ -478,7 +486,7 @@ namespace :prompt do
     proc do |opts|
       error '--claude or --codex required' unless opts[:claude] || opts[:codex]
 
-      raw = $stdin.read
+      raw = opts[:stdin].to_s
       prompt = begin
         JSON.parse(raw).fetch('prompt', raw)
       rescue JSON::ParserError
