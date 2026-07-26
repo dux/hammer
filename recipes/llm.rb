@@ -11,6 +11,7 @@ desc <<~TXT
 
   Commands:
     usage    subscription limits and per-model token usage
+    wrap     run a command with your last two prompts pinned to the screen
 TXT
 
 require 'fileutils'
@@ -74,6 +75,68 @@ task :usage do
       say tables.join("\n\n")
       notes.each { |note| say note, :gray }
     end
+  end
+end
+
+task :wrap do
+  desc <<~D
+    Run a command with the last few prompts you typed pinned to the bottom of the screen.
+
+    The command runs in a PTY that is shorter than the real terminal by the height of
+    the bar, so those rows belong to the bar and nothing the program draws can cover
+    them - no hooks, no tmux, no terminal-specific plumbing. Works with claude, codex,
+    a REPL, a plain shell.
+
+    The bar is a "prompt history" rule with the prompts below it, oldest first, so the
+    newest one sits on the very last line. It is --lines + 1 rows tall.
+
+    Each prompt gets one row: a multi-line prompt is flattened onto it with line breaks
+    shown as a literal \\n, and the whole thing is clipped to the terminal width.
+
+    A prompt is whatever you type between Enters. Shift/Option+Enter and pasted newlines
+    keep appending to the current one. This is keystroke sniffing, so text the program
+    inserts for you (history recall, autocomplete, menu picks) will not show up, and
+    nothing is captured while the program has echo off in canonical mode (sudo, ssh).
+
+    Keys are decoded from plain bytes, the kitty keyboard protocol and xterm
+    modifyOtherKeys, since a program can ask the terminal for any of the three (Claude
+    Code turns on the last two). Mouse reports, focus events, arrows and Ctrl-<key> are
+    not text and are dropped - including Ctrl-V, which pastes an image in Claude Code.
+
+    LLM_WRAP_DEBUG=<file> logs what arrived and how it was read, for when a terminal
+    reports keys in some way this does not know about. It records every keystroke.
+
+    Put `--` before the wrapped command when it has flags of its own, otherwise they are
+    parsed as flags to `llm wrap`.
+  D
+  example 'llm wrap claude'
+  example 'llm wrap -- claude --resume'
+  example 'llm wrap --lines 5 -- bash -l'
+
+  # `positional: false` is load-bearing: the parser fills un-set scalar opts
+  # from positionals in declaration order, so without it `llm wrap claude`
+  # would hand "claude" to --lines and die on the integer cast.
+  opt :lines, type: :integer, default: 3, positional: false,
+              desc: 'how many recent prompts to pin', placeholder: 'N'
+
+  proc do |opts|
+    cmd = Array(opts[:args])
+    error 'usage: llm wrap [--lines N] [--] <command> [args...]' if cmd.empty?
+
+    # Required lazily - llm.rb also runs as a per-prompt hook (`llm prompt
+    # hook`), which should not pay to load pty/io-console. `_llm_root` is a
+    # local from the file scope; the block closes over it (instance_exec
+    # rebinds self, not locals).
+    require File.join(_llm_root, 'lib/llm/wrap')
+
+    # The wrapper renames itself after the program it runs, so that a pane
+    # watcher can still see which agent is in there - which leaves nothing
+    # behind that says how the pane was started. This is that: the invocation
+    # rebuilt from what the parser gave us, since by then the real command line
+    # is a resolved interpreter chain nobody typed. `--` keeps a wrapped
+    # command's own flags out of our parser when it is read back.
+    origin = ['llm', 'wrap', '--lines', opts[:lines].to_s, '--', *cmd]
+    exit LlmWrap.run(cmd, keep: opts[:lines], origin:)
   end
 end
 
