@@ -6,7 +6,7 @@ class OptionTest < Minitest::Test
     assert_equal :env,     o.name
     assert_equal :string,  o.type
     assert_equal '--env',  o.switch
-    assert_equal '--no-env', o.negation
+    refute o.respond_to?(:negation)
     refute o.boolean?
     refute o.required
     assert_empty o.aliases
@@ -96,5 +96,14 @@ class OptionTest < Minitest::Test
     o = Hammer::Option.new(:log, placeholder: 'LEVEL')
     assert_includes o.usage, '--log LEVEL'
     refute_includes o.usage, 'LOG'
+  end
+
+  def test_options_take_positionals_by_default
+    refute Hammer::Option.new(:env).skip_positional_fill?
+    refute Hammer::Option.new(:count, type: :integer, positional: true).skip_positional_fill?
+  end
+
+  def test_positional_false_is_flag_only
+    assert Hammer::Option.new(:lines, type: :integer, positional: false).skip_positional_fill?
   end
 end

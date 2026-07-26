@@ -70,9 +70,10 @@ class Hammer
       end
 
       # Fill un-set non-boolean opts from positional args in declaration
-      # order. Booleans always need an explicit flag. type: :json is flag/
-      # stdin only (skip_positional_fill?). Scalars take one positional
-      # each; an :array opt slurps whatever's left, so it's filled last
+      # order. Booleans always need an explicit flag. type: :json and
+      # `positional: false` are flag-only (skip_positional_fill?). Scalars
+      # take one positional each; an :array opt slurps whatever's left,
+      # so it's filled last
       # and never starves a later-declared scalar opt.
       array_opt = nil
       @options.each do |opt|

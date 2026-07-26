@@ -85,7 +85,8 @@ class JsonExportTest < Minitest::Test
       v = b['options'].find { |o| o['name'] == 'verbose' }
       assert_equal 'boolean', v['type']
       assert_includes v['aliases'], '-v'
-      assert_equal '--no-verbose', v['negation']
+      refute v.key?('negation')
+      assert_equal '--verbose', v['switch']
     end
   end
 

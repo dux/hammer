@@ -3,7 +3,7 @@ class Hammer
   class Option
     attr_reader :name, :type, :default, :desc, :aliases, :required, :placeholder
 
-    ALLOWED_KEYS    ||= %i[type default desc alias req placeholder].freeze
+    ALLOWED_KEYS    ||= %i[type default desc alias req placeholder positional].freeze
     RESERVED_FLAGS  ||= %w[-h --help].freeze
 
     def initialize(name, **opts)
@@ -22,6 +22,11 @@ class Hammer
       # Custom usage placeholder, e.g. `placeholder: 't/f'` -> `--log t/f`.
       # Falls back to uppercased name (`--log LOG`) when nil.
       @placeholder = opts[:placeholder]
+      # `positional: false` means "flag form only" - the option never claims a
+      # bare positional. For commands that forward their positionals somewhere
+      # else (`llm wrap --lines 3 -- claude`), the default fill would otherwise
+      # swallow the first one.
+      @positional  = opts.key?(:positional) ? !!opts[:positional] : true
 
       # Reserve -h / --help so every command supports them uniformly.
       if RESERVED_FLAGS.include?(switch)
@@ -68,9 +73,10 @@ class Hammer
       raise Hammer::Parser::Error, "invalid #{type} value for --#{name}: #{value.inspect}"
     end
 
-    # JSON bodies are flags / stdin / @file — never bare positionals.
+    # JSON bodies are flags / stdin / @file — never bare positionals. Anything
+    # declared `positional: false` opts out the same way.
     def skip_positional_fill?
-      type == :json
+      type == :json || !@positional
     end
 
     def usage
