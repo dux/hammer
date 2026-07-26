@@ -76,7 +76,7 @@ module LuxDeploy
       target.task :doctor do
         desc 'Check & prepare host: service user, dirs, caddy, ruby, bundler'
         opt :server, desc: 'Override hostname from config/deploy/.yaml'
-        opt :fix,    type: :boolean, default: true, desc: 'Auto-fix safe items (default true; --no-fix to skip)'
+        opt :no_fix, type: :boolean, desc: 'Do not auto-fix safe items (default is to fix)'
 
         proc { |opts| LuxDeploy::Hammer.safe(opts) { LuxDeploy::Commands.doctor(opts) } }
       end

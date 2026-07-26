@@ -114,7 +114,7 @@ module LuxDeploy
       host = Context.read_host(opts)
       config = Config.load
       ssh = SSH.new(host, service_user: config.service_user, dry_run: false)
-      Doctor.run(ssh, config, fix: opts.fetch(:fix, true))
+      Doctor.run(ssh, config, fix: !opts[:no_fix])
     end
 
     # -------- app:init ----------------------------------------------------
