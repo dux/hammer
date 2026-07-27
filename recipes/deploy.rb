@@ -16,9 +16,17 @@ desc <<~TXT
     deploy log --log errors  # dump a remote log
 TXT
 
-# Loads the bundled lib (config/ssh/template/doctor/context/manifest/
-# commands/hammer) - same require chain the gem's lib/lux_deploy.rb had.
-require_relative 'lib/deploy/boot'
+# The engine lives in the lux-deploy gem. This recipe used to carry a vendored
+# copy of it, which drifted a full major version behind and would have deployed
+# 0.2 semantics onto a 0.3 host. Requiring the gem keeps one engine.
+#
+# Not a gemspec dependency - lux-hammer stays zero-dependency, and only this
+# one recipe needs it. The require is what enforces it, at invocation time.
+begin
+  require 'lux_deploy'
+rescue LoadError
+  abort 'lux-deploy is not installed. Run: gem install lux-deploy'
+end
 
 # Auto-load the app's deploy bootstrap, if present, before tasks fire.
 # A consumer can inject Ruby (e.g. a pre-deploy hook) without writing a
@@ -26,7 +34,7 @@ require_relative 'lib/deploy/boot'
 init = File.join(Dir.pwd, 'config', 'deploy', 'init.rb')
 load init if File.file?(init)
 
-# `self` here is the recipe's Builder context - same surface a Hammerfile
-# gets. Pass templates_dir explicitly since there's no gem ROOT to fall
-# back to; it resolves to recipes/lib/deploy/templates.
-LuxDeploy::Hammer.register(self, templates_dir: File.join(__dir__, 'lib/deploy/templates'))
+# `self` here is the recipe's Builder context - same surface a Hammerfile gets.
+# No templates_dir: the gem falls back to its own LuxDeploy::ROOT/templates,
+# which is what the standalone `lux-deploy` binary uses too.
+LuxDeploy::Hammer.register(self)
