@@ -7,6 +7,7 @@ desc <<~TXT
 
   Namespaces:
     memory   persistent memory store (backs the Claude Code memory plugin)
+    plan     apply a /plan bundle - sha1 checked, drift aware
     prompt   token-prefix prompt expander (UserPromptSubmit hook + CLI)
 
   Commands:
@@ -23,6 +24,7 @@ require 'set'
 # checkout still load matching lib/, not an older installed gem copy).
 _llm_root = File.dirname(File.realpath(__FILE__))
 require File.join(_llm_root, 'lib/llm/usage')
+require File.join(_llm_root, 'lib/llm/plan')
 
 STORE        ||= ENV['CLAUDE_MEMORY_STORE'] || File.expand_path('~/dev/ai/memory')
 VALID_TYPES  ||= %w[user feedback project reference].freeze
@@ -590,6 +592,113 @@ namespace :prompt do
 
       context = load_context(prompt.to_s, fail_open: true)
       puts JSON.generate(hook_json(context))
+    end
+  end
+end
+
+namespace :plan do
+  # Helpers live inside the namespace block for the same reason as :memory -
+  # a top-level `helpers do` lands on the root class, which namespaces do not
+  # inherit from.
+  private
+
+  def load_bundle(opts)
+    path = opts[:args].first
+    error 'usage: llm plan:<apply|check|verify|revert> ./tmp/plan-[SLUG].json' unless path
+    LlmPlan::Bundle.new(path)
+  rescue LlmPlan::Error => e
+    error e.message
+  end
+
+  def render(outcome)
+    LlmPlan::Report.new(outcome).lines.each { |text, color| say text, color }
+  end
+
+  def run_verify(runner)
+    result = runner.verify { |cmd| say "  > #{cmd}", :cyan }
+    result.ok ? say('  verify ok', :green) : say("  FAIL #{result.failed_command}", :red)
+    result
+  end
+
+  task :apply do
+    desc <<~D
+      Apply a /plan bundle: sha1-checked edits now, drift handed back to you.
+
+      The bundle is JSON written at planning time, normally ./tmp/plan-[SLUG].json:
+
+        { "slug": "note-anchor",
+          "goal":   "one line, why this change exists",
+          "commit": { "subject": "...", "body": "..." },
+          "verify": ["bundle exec rspec spec/note_spec.rb"],
+          "files": [
+            { "path": "./a.rb", "op": "create", "content": "..." },
+            { "path": "./b.rb", "op": "change", "sha1": "<shasum at plan time>",
+              "hunks": [{ "intent": "why", "old": "...", "new": "...", "all": false }] },
+            { "path": "./c.rb", "op": "delete", "sha1": "<shasum at plan time>" }
+          ] }
+
+      Every change and delete carries the sha1 its target had when the plan was
+      written; a create carries none, and its check is "must not exist". Files
+      that still match are applied without being re-read. Files that moved on
+      are printed with their intent and their wanted old/new text, for you to
+      apply by hand - that is the normal path, not an error.
+
+      A file is only written once all of its hunks resolve, writes are atomic,
+      and every touched file is copied to <slug>.bak first. Re-running a bundle
+      that already landed is a no-op. `verify` runs only when nothing drifted.
+
+      Side effects, next to the bundle: <slug>.bak/ (undo) and <slug>.msg
+      (commit message, for `git commit -F`). Committing is never automatic.
+
+      Exit: 0 applied and green, 10 something needs you, 20 verify failed.
+    D
+    example 'llm plan:apply ./tmp/plan-note-anchor.json'
+
+    proc do |opts|
+      bundle  = load_bundle(opts)
+      runner  = LlmPlan::Runner.new(bundle)
+      outcome = runner.apply
+
+      render outcome
+      outcome.verify = run_verify(runner) if outcome.clean?
+
+      exit outcome.exit_code
+    end
+  end
+
+  task :check do
+    desc 'Dry run: report what would apply and what has drifted, write nothing.'
+    example 'llm plan:check ./tmp/plan-note-anchor.json'
+
+    proc do |opts|
+      outcome = LlmPlan::Runner.new(load_bundle(opts)).apply(check_only: true)
+      render outcome
+      exit outcome.exit_code
+    end
+  end
+
+  task :verify do
+    desc <<~D
+      Run only the bundle's verify commands.
+
+      For after you have closed a drift by hand, or fixed what a failing verify
+      caught. Exit 0 green, 20 failed.
+    D
+    example 'llm plan:verify ./tmp/plan-note-anchor.json'
+
+    proc do |opts|
+      exit run_verify(LlmPlan::Runner.new(load_bundle(opts))).ok ? 0 : 20
+    end
+  end
+
+  task :revert do
+    desc 'Undo an applied bundle from <slug>.bak: restore changed and deleted files, remove created ones.'
+    example 'llm plan:revert ./tmp/plan-note-anchor.json'
+
+    proc do |opts|
+      LlmPlan::Runner.new(load_bundle(opts)).revert.each { |path| say "  restored #{path}", :green }
+    rescue LlmPlan::Error => e
+      error e.message
     end
   end
 end
