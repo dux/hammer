@@ -91,7 +91,7 @@ task :wrap do
     newest one sits on the very last line. It is --lines + 1 rows tall.
 
     Each prompt gets one row: a multi-line prompt is flattened onto it with line breaks
-    shown as a literal \\n, and the whole thing is clipped to the terminal width.
+    shown as a backslash, and the whole thing is clipped to the terminal width.
 
     A prompt is whatever you type between Enters. Shift/Option+Enter and pasted newlines
     keep appending to the current one. This is keystroke sniffing, so text the program
