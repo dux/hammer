@@ -154,8 +154,12 @@ module LlmWrap
 
   # The commands `llm wrap` offers when asked for no particular one. Plain
   # text, one command per line - nothing to learn, editable with anything.
-  # Blank lines and # comments are skipped, so a command can be parked without
-  # being deleted.
+  #
+  # A # comment is dropped, so a command can be parked without being deleted.
+  # A line with no letter in it is kept but not runnable: blanks and ---- rules
+  # stay visible in the picker to group the list, the cursor just steps over
+  # them. No executable name is spelled without a letter, so nothing real is
+  # caught by that.
   module Config
     DEFAULTS ||= [
       'claude --dangerously-skip-permissions --continue',
@@ -172,11 +176,20 @@ module LlmWrap
     def self.lines
       return [] unless File.file?(path)
 
+      # Decide what to keep first, then tidy what survived - lstrip inside the
+      # test so an indented # is still a comment.
       File.readlines(path, chomp: true)
+          .reject { |line| line.lstrip.start_with?('#') }
           .map(&:strip)
-          .reject { |line| line.empty? || line.start_with?('#') }
     rescue SystemCallError, IOError
       []
+    end
+
+    # A row the picker shows but will not run. Nothing without a letter in it
+    # can name a program, which makes ---- and a blank line free to use as
+    # dividers without needing a syntax for them.
+    def self.runnable?(line)
+      line.match?(/[a-z]/i)
     end
 
     # Split rather than hand the line over whole: PTY.spawn passes a

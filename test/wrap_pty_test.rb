@@ -249,6 +249,32 @@ class WrapPtyTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
+  # A divider is drawn but never landed on, so one press of Down from the first
+  # command reaches the second - not the rule between them. Without the skip
+  # this run would try to execute "-".
+  def test_the_cursor_steps_over_a_divider
+    dir  = Dir.mktmpdir('llm-wrap-pty-config')
+    conf = File.join(dir, 'llm-wrap.txt')
+    File.write(conf, "echo PICKED-ONE\n-\necho PICKED-TWO\n")
+
+    out, inp, pid, read = spawn_wrap(env: { 'LLM_WRAP_CONFIG' => conf })
+    sleep 0.8
+    inp.write("\e[B")
+    sleep 0.25
+    inp.write("\r")
+    sleep 0.8
+    Process.waitpid(pid) rescue nil
+
+    raw = read.call
+    assert_includes raw, '-', 'the divider is on screen'
+    assert_includes raw, 'PICKED-TWO', 'one step down clears the divider'
+    refute_includes raw, 'command not found', 'a divider was never run'
+  ensure
+    out&.close rescue nil
+    inp&.close rescue nil
+    FileUtils.remove_entry(dir) if dir
+  end
+
   # The handoff is how clone-tab reopens a pane, so a picked command has to be
   # written down in full - a bare `llm wrap` would reopen the picker instead.
   def test_a_picked_command_is_recorded_in_the_handoff

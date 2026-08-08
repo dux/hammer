@@ -110,9 +110,10 @@ task :wrap do
     parsed as flags to `llm wrap`.
 
     With no command at all, the commands in ~/.config/hammer/llm-wrap.txt are offered in
-    an arrow-key picker instead. That file is plain text, one command per line; blank
-    lines and # comments are skipped. `--config` opens it in $EDITOR, writing a starting
-    set the first time.
+    an arrow-key picker instead. That file is plain text, one command per line. A line
+    starting with # is dropped, and a line with no letter in it stays on screen but
+    cannot be picked - so blanks and ---- rules group the list without being in the way.
+    `--config` opens it in $EDITOR, writing a starting set the first time.
   D
   example 'llm wrap'
   example 'llm wrap --config'
@@ -150,9 +151,11 @@ task :wrap do
     if cmd.empty?
       LlmWrap::Config.seed
       choices = LlmWrap::Config.lines
-      error "no commands in #{LlmWrap::Config.path} - add one with: llm wrap --config" if choices.empty?
+      unless choices.any? { |line| LlmWrap::Config.runnable?(line) }
+        error "no commands in #{LlmWrap::Config.path} - add one with: llm wrap --config"
+      end
 
-      idx = choose('wrap which command?', choices)
+      idx = choose('wrap which command?', choices, skip: ->(line) { !LlmWrap::Config.runnable?(line) })
       next say.gray('cancelled') unless idx
 
       cmd = LlmWrap::Config.argv(choices[idx])

@@ -534,9 +534,25 @@ class WrapConfigTest < Minitest::Test
     assert_empty CF.lines
   end
 
-  def test_lines_skips_blanks_and_comments_and_strips
-    write("claude\n\n  # a note\n   codex resume   \n")
+  def test_lines_drops_comments_and_strips
+    write("claude\n  # a note\n   codex resume   \n")
     assert_equal ['claude', 'codex resume'], CF.lines
+  end
+
+  # Dividers stay in the list - they are there to be looked at. What they are
+  # not is runnable, and the picker steps over them on that basis.
+  def test_dividers_are_kept_but_not_runnable
+    write("claude\n----\n====\n***\n  \n7z x archive.7z\n")
+    assert_equal ['claude', '----', '====', '***', '', '7z x archive.7z'], CF.lines
+
+    runnable = CF.lines.select { |line| CF.runnable?(line) }
+    assert_equal ['claude', '7z x archive.7z'], runnable,
+                 'a leading digit is fine - the whole line is searched for a letter'
+  end
+
+  def test_lines_strips_after_selecting_so_an_indented_comment_is_still_one
+    write("\t# parked\n\t  claude --continue\t\n")
+    assert_equal ['claude --continue'], CF.lines
   end
 
   def test_argv_splits_honouring_quotes
