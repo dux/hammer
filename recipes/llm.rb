@@ -108,26 +108,55 @@ task :wrap do
 
     Put `--` before the wrapped command when it has flags of its own, otherwise they are
     parsed as flags to `llm wrap`.
+
+    With no command at all, the commands in ~/.config/hammer/llm-wrap.txt are offered in
+    an arrow-key picker instead. That file is plain text, one command per line; blank
+    lines and # comments are skipped. `--config` opens it in $EDITOR, writing a starting
+    set the first time.
   D
+  example 'llm wrap'
+  example 'llm wrap --config'
   example 'llm wrap claude'
   example 'llm wrap -- claude --resume'
   example 'llm wrap --lines 5 -- bash -l'
 
   # `positional: false` is load-bearing: the parser fills un-set scalar opts
   # from positionals in declaration order, so without it `llm wrap claude`
-  # would hand "claude" to --lines and die on the integer cast.
+  # would hand "claude" to --lines and die on the integer cast. `--config` is
+  # boolean, which the parser skips over, so it needs no such guard.
   opt :lines, type: :integer, default: 3, positional: false,
               desc: 'how many recent prompts to pin', placeholder: 'N'
+  opt :config, type: :boolean, desc: 'open the command list in $EDITOR'
 
   proc do |opts|
-    cmd = Array(opts[:args])
-    error 'usage: llm wrap [--lines N] [--] <command> [args...]' if cmd.empty?
-
     # Required lazily - llm.rb also runs as a per-prompt hook (`llm prompt
     # hook`), which should not pay to load pty/io-console. `_llm_root` is a
     # local from the file scope; the block closes over it (instance_exec
     # rebinds self, not locals).
     require File.join(_llm_root, 'lib/llm/wrap')
+
+    if opts[:config]
+      editor = ENV['EDITOR'] || ENV['VISUAL']
+      error '$EDITOR not set' unless editor
+      say.green "created #{LlmWrap::Config.path}" if LlmWrap::Config.seed
+      exit system(editor, LlmWrap::Config.path) ? 0 : 1
+    end
+
+    cmd = Array(opts[:args])
+
+    # Nothing asked for: offer the list rather than a usage error. The picker
+    # shows each line as it was written - re-joining a split argv would quote
+    # it back differently from what is in the file.
+    if cmd.empty?
+      LlmWrap::Config.seed
+      choices = LlmWrap::Config.lines
+      error "no commands in #{LlmWrap::Config.path} - add one with: llm wrap --config" if choices.empty?
+
+      idx = choose('wrap which command?', choices)
+      next say.gray('cancelled') unless idx
+
+      cmd = LlmWrap::Config.argv(choices[idx])
+    end
 
     # The wrapper renames itself after the program it runs, so that a pane
     # watcher can still see which agent is in there - which leaves nothing

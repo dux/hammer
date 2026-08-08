@@ -487,3 +487,74 @@ class WrapHandoffTest < Minitest::Test
     pid
   end
 end
+
+# The command list behind a bare `llm wrap`. Plain text on purpose, so the
+# tests are mostly about being forgiving with what someone hand-edits into it.
+class WrapConfigTest < Minitest::Test
+  CF = LlmWrap::Config
+
+  def setup
+    @dir = Dir.mktmpdir('llm-wrap-config-test')
+    @was = ENV['LLM_WRAP_CONFIG']
+    ENV['LLM_WRAP_CONFIG'] = File.join(@dir, 'nested', 'llm-wrap.txt')
+  end
+
+  def teardown
+    ENV['LLM_WRAP_CONFIG'] = @was
+    FileUtils.remove_entry(@dir)
+  end
+
+  def write(text)
+    FileUtils.mkdir_p(File.dirname(CF.path))
+    File.write(CF.path, text)
+  end
+
+  def test_seed_creates_the_file_and_its_directory
+    assert CF.seed, 'seeding a missing file reports that it wrote one'
+    assert_equal CF::DEFAULTS, CF.lines
+  end
+
+  def test_seed_overwrites_a_file_that_is_only_whitespace
+    write("\n  \n\t\n")
+    assert CF.seed
+    assert_equal CF::DEFAULTS, CF.lines
+  end
+
+  def test_seed_leaves_a_file_that_has_content
+    write("bash -l\n")
+    refute CF.seed, 'an existing list is never overwritten'
+    assert_equal ['bash -l'], CF.lines
+  end
+
+  # Commented-out lines are notes, not an empty file - seeding over them would
+  # throw away the thing someone parked there.
+  def test_seed_leaves_a_file_that_is_only_comments
+    write("# claude --resume\n")
+    refute CF.seed
+    assert_empty CF.lines
+  end
+
+  def test_lines_skips_blanks_and_comments_and_strips
+    write("claude\n\n  # a note\n   codex resume   \n")
+    assert_equal ['claude', 'codex resume'], CF.lines
+  end
+
+  def test_argv_splits_honouring_quotes
+    assert_equal %w[bash -l], CF.argv('bash -l')
+    assert_equal ['zsh', '-ic', 'codex --yolo'], CF.argv(%(zsh -ic 'codex --yolo'))
+  end
+
+  def test_missing_file_reads_as_empty_rather_than_raising
+    assert_empty CF.lines
+  end
+
+  # Every seeded line has to survive the same split the picker feeds to
+  # PTY.spawn - a typo in DEFAULTS would only show up at launch otherwise.
+  def test_defaults_are_all_parseable_commands
+    CF.seed
+    argvs = CF.lines.map { |line| CF.argv(line) }
+    assert_equal CF::DEFAULTS.size, argvs.size
+    argvs.each { |argv| assert_operator argv.size, :>=, 2 }
+    assert_equal %w[claude codex grok], argvs.map(&:first)
+  end
+end

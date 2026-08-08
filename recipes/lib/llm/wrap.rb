@@ -3,6 +3,7 @@
 require 'fileutils'
 require 'io/console'
 require 'pty'
+require 'shellwords'
 
 # Run a command in a PTY with the last prompts you typed pinned to the bottom
 # rows of the screen, under a "prompt history" rule.
@@ -148,6 +149,53 @@ module LlmWrap
       end
     rescue SystemCallError, IOError
       nil
+    end
+  end
+
+  # The commands `llm wrap` offers when asked for no particular one. Plain
+  # text, one command per line - nothing to learn, editable with anything.
+  # Blank lines and # comments are skipped, so a command can be parked without
+  # being deleted.
+  module Config
+    DEFAULTS ||= [
+      'claude --dangerously-skip-permissions --continue',
+      'codex resume --last --dangerously-bypass-approvals-and-sandbox',
+      'grok --always-approve --continue'
+    ].freeze
+
+    # A method rather than a constant for the same reason as Handoff.dir: the
+    # tests need somewhere else to write.
+    def self.path
+      ENV['LLM_WRAP_CONFIG'] || File.expand_path('~/.config/hammer/llm-wrap.txt')
+    end
+
+    def self.lines
+      return [] unless File.file?(path)
+
+      File.readlines(path, chomp: true)
+          .map(&:strip)
+          .reject { |line| line.empty? || line.start_with?('#') }
+    rescue SystemCallError, IOError
+      []
+    end
+
+    # Split rather than hand the line over whole: PTY.spawn passes a
+    # one-element argv to /bin/sh, and a command out of this file should reach
+    # the wrapper the same way `llm wrap claude --foo` already does - as argv,
+    # no shell in between.
+    def self.argv(line)
+      Shellwords.split(line)
+    end
+
+    # Writes DEFAULTS when there is nothing there yet - no file, or one that is
+    # only whitespace. A file holding just commented-out lines is left alone;
+    # those are someone's notes, not an empty file.
+    def self.seed
+      return false if File.file?(path) && !File.read(path).strip.empty?
+
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "#{DEFAULTS.join("\n")}\n")
+      true
     end
   end
 

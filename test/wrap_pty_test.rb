@@ -223,9 +223,71 @@ class WrapPtyTest < Minitest::Test
     refute_includes plain, "\e"
   end
 
-  def test_empty_command_is_refused
-    `#{LLM} wrap 2>&1`
+  # No command means "offer me the list": the picker runs in the normal
+  # terminal, and only once something is chosen does the wrapper take the
+  # screen. Down-then-Enter has to land on the second line and run it.
+  def test_no_command_picks_from_the_config_and_runs_the_choice
+    dir  = Dir.mktmpdir('llm-wrap-pty-config')
+    conf = File.join(dir, 'llm-wrap.txt')
+    File.write(conf, "echo PICKED-ONE\n\n# parked\necho PICKED-TWO\n")
+
+    out, inp, pid, read = spawn_wrap(env: { 'LLM_WRAP_CONFIG' => conf })
+    sleep 0.8
+    inp.write("\e[B")   # down
+    sleep 0.25
+    inp.write("\r")     # enter
+    sleep 0.8
+    Process.waitpid(pid) rescue nil
+
+    raw = read.call
+    assert_includes raw, 'echo PICKED-ONE', 'both lines are offered'
+    refute_includes raw, 'parked', 'comments are not commands'
+    assert_includes raw, 'PICKED-TWO', 'the chosen line actually ran'
+  ensure
+    out&.close rescue nil
+    inp&.close rescue nil
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  # The handoff is how clone-tab reopens a pane, so a picked command has to be
+  # written down in full - a bare `llm wrap` would reopen the picker instead.
+  def test_a_picked_command_is_recorded_in_the_handoff
+    dir   = Dir.mktmpdir('llm-wrap-pty-config')
+    state = Dir.mktmpdir('llm-wrap-pty')
+    conf  = File.join(dir, 'llm-wrap.txt')
+    File.write(conf, "sleep 5\n")
+
+    out, inp, pid, = spawn_wrap(env: { 'LLM_WRAP_CONFIG' => conf, 'XDG_STATE_HOME' => state })
+    sleep 0.8
+    inp.write("\r")
+    sleep 0.8
+
+    assert_equal 'sleep', `ps -o args= -p #{pid}`.strip
+    handoff = File.join(state, 'llm-wrap', pid.to_s)
+    assert_path_exists handoff
+    assert_equal %w[llm wrap --lines 3 -- sleep 5], File.read(handoff).split("\n")
+
+    Process.kill('TERM', pid)
+    Process.waitpid(pid)
+  ensure
+    out&.close rescue nil
+    inp&.close rescue nil
+    FileUtils.remove_entry(dir) if dir
+    FileUtils.remove_entry(state) if state
+  end
+
+  # A list with nothing runnable in it is a dead end, so say where to fix it
+  # rather than dropping into an empty picker.
+  def test_an_empty_config_points_at_the_editor_flag
+    dir  = Dir.mktmpdir('llm-wrap-pty-config')
+    conf = File.join(dir, 'llm-wrap.txt')
+    File.write(conf, "# everything parked\n")
+
+    said = `LLM_WRAP_CONFIG=#{conf} #{LLM} wrap 2>&1`
     refute_equal 0, $?.exitstatus
+    assert_includes said, 'llm wrap --config'
+  ensure
+    FileUtils.remove_entry(dir) if dir
   end
 
   def test_resize_reaches_the_child_and_the_region_follows
