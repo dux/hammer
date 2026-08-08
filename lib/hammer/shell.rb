@@ -88,25 +88,42 @@ class Hammer
     #
     #   idx = choose 'Pick env', %w[dev staging prod]
     #   say.green "chose #{ %w[dev staging prod][idx] }" if idx
-    def choose(prompt, items)
+    #
+    # `skip` marks rows that are shown but never landed on, so a list can
+    # carry its own headings and rules. They are drawn in gray, the cursor
+    # steps over them, and the returned index still counts every row:
+    #
+    #   choose 'Pick', ['-- fast --', 'dev', '-- slow --', 'prod'],
+    #          skip: ->(item) { item.start_with?('--') }
+    def choose(prompt, items, skip: nil)
       items = items.to_a
       error 'choose needs at least one item' if items.empty?
 
+      live = items.each_index.reject { |i| skip&.call(items[i]) }
+      error 'choose needs at least one selectable item' if live.empty?
+
       say.cyan prompt
 
-      return choose_numbered(items) unless $stdin.tty? && $stdin.respond_to?(:raw)
+      return choose_numbered(items, live) unless $stdin.tty? && $stdin.respond_to?(:raw)
 
-      selected = 0
+      selected = live.first
       # In raw mode \n is not translated to \r\n, so the picker uses \r\n
       # explicitly. The initial draw happens in cooked mode but \r\n is
       # harmless there.
       redraw = lambda do |highlight = :cyan|
         items.each_with_index do |item, i|
-          line = i == selected ? paint("> #{item}", highlight) : "  #{item}"
+          line = if !live.include?(i) then paint("  #{item}", :gray)
+                 elsif i == selected  then paint("> #{item}", highlight)
+                 else                      "  #{item}"
+                 end
           $stdout.print "#{line}\r\n"
         end
       end
       redraw.call
+
+      # Move by position among the selectable rows, so skipped ones are
+      # stepped over in both directions and the wrap-around still works.
+      step = ->(dir) { live[(live.index(selected) + dir) % live.size] }
 
       $stdout.print "\e[?25l" # hide cursor
       begin
@@ -126,15 +143,15 @@ class Hammer
               # ESC may stand alone or start an arrow sequence \e[A / \e[B.
               if IO.select([io], nil, nil, 0.01) && io.getch == '['
                 case io.getch
-                when 'A' then selected = (selected - 1) % items.size
-                when 'B' then selected = (selected + 1) % items.size
+                when 'A' then selected = step.call(-1)
+                when 'B' then selected = step.call(1)
                 end
               else
                 $stdout.print "\e[#{items.size}A\r\e[J"
                 return nil
               end
-            when 'k' then selected = (selected - 1) % items.size
-            when 'j' then selected = (selected + 1) % items.size
+            when 'k' then selected = step.call(-1)
+            when 'j' then selected = step.call(1)
             end
             $stdout.print "\e[#{items.size}A\r\e[J"
             redraw.call
@@ -146,13 +163,17 @@ class Hammer
     end
 
     # Fallback for non-TTY stdin (pipes, tests). Returns the index or nil.
-    def choose_numbered(items)
-      items.each_with_index { |item, i| puts "  #{i + 1}) #{item}" }
-      print paint("select [1-#{items.size}]: ", :cyan)
+    # Skipped rows are still printed, just without a number to type.
+    def choose_numbered(items, live = items.each_index.to_a)
+      items.each_with_index do |item, i|
+        n = live.index(i)
+        puts n ? "  #{n + 1}) #{item}" : "     #{item}"
+      end
+      print paint("select [1-#{live.size}]: ", :cyan)
       line = $stdin.gets
       return nil if line.nil?
       idx = line.strip.to_i - 1
-      idx.between?(0, items.size - 1) ? idx : nil
+      idx.between?(0, live.size - 1) ? live[idx] : nil
     end
 
     # Run a shell command. Echoes the command in gray, raises

@@ -159,4 +159,39 @@ class ShellTest < Minitest::Test
     end
     assert_includes err.message, 'at least one item'
   end
+
+  # Skipped rows are furniture: on screen, never landed on. The returned index
+  # still counts them, so the caller can index straight back into what it passed.
+  def test_choose_shows_skipped_rows_but_does_not_number_them
+    $stdin = StringIO.new("2\n")
+    items  = ['-- fast --', 'dev', '-- slow --', 'prod']
+    out, = capture do
+      @idx = Hammer::Shell.choose('Pick', items, skip: ->(i) { i.start_with?('--') })
+    end
+
+    assert_equal 3, @idx, 'the index addresses the full list, dividers included'
+    assert_equal 'prod', items[@idx]
+    assert_includes out, '1) dev'
+    assert_includes out, '2) prod'
+    assert_includes out, '-- fast --', 'a divider is still drawn'
+    refute_includes out, '1) -- fast --'
+    assert_includes out, 'select [1-2]:', 'only the selectable rows are counted'
+  ensure
+    $stdin = STDIN
+  end
+
+  def test_choose_raises_when_every_row_is_skipped
+    err = assert_raises(Hammer::Error) do
+      capture { Hammer::Shell.choose('Pick', %w[--- ===], skip: ->(_) { true }) }
+    end
+    assert_includes err.message, 'at least one selectable item'
+  end
+
+  def test_choose_without_skip_is_unchanged
+    $stdin = StringIO.new("3\n")
+    capture { @idx = Hammer::Shell.choose('Pick', %w[a b c]) }
+    assert_equal 2, @idx
+  ensure
+    $stdin = STDIN
+  end
 end
