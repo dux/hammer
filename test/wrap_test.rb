@@ -298,6 +298,130 @@ class WrapKeyBufferTest < Minitest::Test
   end
 end
 
+# LlmWrap::OutScan watches the child's output go past and says whether the
+# terminal's parser is at rest, which is the only moment the bar may be painted.
+#
+# A pty master hands back at most a kilobyte a read, so a redraw arrives split
+# at arbitrary bytes: every case here is a sequence or a character cut in half
+# by that split, which is exactly what a paint used to land in the middle of.
+class WrapOutScanTest < Minitest::Test
+  def scan(*chunks)
+    s = LlmWrap::OutScan.new
+    chunks.each { |c| s.feed(c.b) }
+    s
+  end
+
+  def assert_safe(*chunks)
+    assert scan(*chunks).safe?, "expected a resting parser after #{chunks.inspect}"
+  end
+
+  def refute_safe(*chunks)
+    refute scan(*chunks).safe?, "expected a sequence still open after #{chunks.inspect}"
+  end
+
+  def test_plain_text_is_always_safe
+    assert_safe 'hello world'
+    assert_safe "one\r\ntwo\tthree"
+  end
+
+  def test_a_bare_escape_is_not_a_boundary
+    refute_safe "\e"
+    refute_safe 'text', "\e"
+  end
+
+  def test_csi_is_open_until_its_final_byte
+    refute_safe "\e["
+    refute_safe "\e[38;5;"
+    assert_safe "\e[38;5;245m"
+    assert_safe "\e[38;5;", '245m'
+    assert_safe "\e[?1049h"
+  end
+
+  def test_csi_split_across_reads
+    refute_safe "\e[1;20"
+    assert_safe "\e[1;20", 'r'
+  end
+
+  def test_ss3_and_charset_designators_take_one_more_byte
+    refute_safe "\eO"
+    assert_safe "\eOP"
+    refute_safe "\e("
+    assert_safe "\e(B"
+  end
+
+  def test_two_byte_escapes_end_on_the_second_byte
+    assert_safe "\eM"
+    assert_safe "\e="
+  end
+
+  def test_osc_runs_to_bel_or_st
+    refute_safe "\e]0;a title"
+    assert_safe "\e]0;a title\a"
+    assert_safe "\e]0;a title", "\e\\"
+    refute_safe "\e]0;a title", "\e"
+  end
+
+  # An OSC payload can hold anything, including bytes that end a CSI - reading
+  # it as one would call the middle of a window title a boundary.
+  def test_osc_payload_is_not_read_as_a_csi
+    refute_safe "\e]10;rgb:cdcd/d6d6/f4f4"
+    assert_safe "\e]10;rgb:cdcd/d6d6/f4f4", "\e\\"
+  end
+
+  def test_dcs_and_apc_are_string_sequences_too
+    refute_safe "\eP1$r"
+    assert_safe "\eP1$r0m", "\e\\"
+    refute_safe "\e_G"
+    assert_safe "\e_G", "\e\\"
+  end
+
+  def test_utf8_character_split_across_reads
+    bytes = '─'.b
+    refute_safe bytes[0]
+    refute_safe bytes[0, 2]
+    assert_safe bytes
+    assert_safe bytes[0, 2], bytes[2]
+
+    emoji = '🙂'.b
+    refute_safe emoji[0, 3]
+    assert_safe emoji
+  end
+
+  # The child's own cursor save. The terminal has one slot, so painting between
+  # the two would take it and its ESC8 would land the cursor on our bar - Claude
+  # Code wraps every repaint in this pair.
+  def test_an_open_decsc_is_not_a_boundary
+    refute_safe "\e7"
+    refute_safe "\e7", "\e[5;1H", 'some text'
+    assert_safe "\e7", "\e[5;1H", 'some text', "\e8"
+  end
+
+  def test_an_unmatched_decrc_does_not_go_negative
+    assert_safe "\e8"
+    assert_safe "\e8\e8\e7\e8"
+  end
+
+  def test_reset_forgives_a_stream_we_have_lost
+    s = scan("\e]0;never terminated")
+    refute_predicate s, :safe?
+    s.reset!
+    assert_predicate s, :safe?
+  end
+
+  def test_runaway_sequences_do_not_block_forever
+    assert_safe "\e[#{'1;' * 200}"
+    assert_safe "\e]0;#{'x' * 9000}"
+  end
+
+  # The fast path skips the byte walk when a chunk cannot start a sequence or a
+  # character - it must not lose state that is already open.
+  def test_the_plain_text_fast_path_keeps_open_state
+    refute_safe "\e[", '38;5;245'
+    refute_safe "\e7", 'plain ascii'
+    assert_safe "\e[", '38;5;245', 'm'
+  end
+end
+
 # The wrapper answers to the name of the program it runs, so that anything
 # watching the pane can still tell what is in it - which leaves nothing behind
 # that says how the pane was started. Handoff is that record, and Herdr's

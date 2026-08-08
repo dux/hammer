@@ -36,6 +36,20 @@ module LlmWrap
   MAX_DEFER ||= 0.15
   CHUNK     ||= 65_536
 
+  # A pty master hands back at most a kilobyte per read whatever CHUNK says, so
+  # one redraw arrives as dozens of pieces. DRAIN_MAX caps how much of it we
+  # take in a single go, so a child that never stops talking cannot starve the
+  # keyboard. MAX_BLOCK is how long a paint will wait for a safe moment before
+  # giving up and taking one - see Session#paint.
+  DRAIN_MAX ||= 262_144
+  MAX_BLOCK ||= 1.5
+
+  # Introducers of the escape sequences that carry a string payload:
+  # OSC ], DCS P, SOS X, PM ^, APC _. They run to BEL or ST rather than to a
+  # final byte, so both stream parsers here - KeyBuffer on the way in, OutScan
+  # on the way out - have to know them to find the end of one.
+  STRING_INTRO ||= [0x5d, 0x50, 0x58, 0x5e, 0x5f].freeze
+
   # `origin` is how this wrapper was asked for, in the words that would ask for
   # it again - only the caller knows that, since taking the child's name throws
   # our own command line away. It is what Handoff writes down; the child's argv
@@ -143,9 +157,12 @@ module LlmWrap
       @origin   = origin
       @bar_rows = keep + 1     # the prompts, plus the rule above them
       @keys     = KeyBuffer.new(keep)
+      @out      = OutScan.new
       @winch    = false
       @dirty    = true
       @drawn_at = 0.0
+      @blocked  = nil
+      @skipped  = nil
       @started  = now
       @trace    = (File.open(ENV['LLM_WRAP_DEBUG'], 'a') if ENV['LLM_WRAP_DEBUG'].to_s != '')
     rescue SystemCallError
@@ -281,7 +298,7 @@ module LlmWrap
         ready = IO.select([$stdin, @pty_out], nil, nil, IDLE_TICK)
 
         unless ready
-          draw_bar if @dirty        # output settled
+          paint if @dirty   # output settled
           next
         end
 
@@ -293,8 +310,9 @@ module LlmWrap
             @dirty = true if taking && @keys.feed(data)
             trace_in(data, taking)
           else
-            data = slurp(@pty_out) or return
+            data = drain(@pty_out) or return
             $stdout.write(data)
+            @out.feed(data)
             trace_out(data)
             # The child cannot address the bar rows, but it can switch to the
             # alt screen (which starts blank) or scroll a region it set itself.
@@ -304,7 +322,7 @@ module LlmWrap
         end
 
         # Keep the bar honest while output streams without ever settling.
-        draw_bar if @dirty && now - @drawn_at > MAX_DEFER
+        paint if @dirty && now - @drawn_at > MAX_DEFER
       end
     rescue Errno::EIO, Errno::EPIPE, EOFError
       nil
@@ -314,6 +332,49 @@ module LlmWrap
       io.readpartial(CHUNK)
     rescue EOFError, Errno::EIO, IOError
       nil
+    end
+
+    # Take everything the child has queued, not just the kilobyte a pty master
+    # gives back per read. One redraw then lands in a single write and the paint
+    # that follows it falls on a frame boundary instead of inside the frame.
+    def drain(io)
+      data = slurp(io) or return nil
+
+      while data.bytesize < DRAIN_MAX && IO.select([io], nil, nil, 0)
+        more = slurp(io) or break
+        data << more
+      end
+
+      data
+    end
+
+    # Paint only where the terminal's parser is at rest - see OutScan for what
+    # goes wrong otherwise. The bar is cosmetic, so waiting is nearly always
+    # right; the exception is a child that leaves a sequence open for good (an
+    # unterminated OSC, a DECSC it never restores), where a bar frozen on the
+    # wrong prompts is worse than one glitched frame.
+    def paint
+      return released if @out.safe?
+
+      @blocked ||= now
+
+      if now - @blocked < MAX_BLOCK
+        # Once per state rather than once per tick, or the log is nothing else.
+        reason   = @out.to_s
+        trace('SKIP', reason) if reason != @skipped
+        @skipped = reason
+        return
+      end
+
+      trace('FORCE', @out.to_s)
+      @out.reset!
+      released
+    end
+
+    def released
+      @blocked = nil
+      @skipped = nil
+      draw_bar
     end
 
     # Terminals disagree wildly about how they report keys, and the encoding
@@ -368,6 +429,139 @@ module LlmWrap
     end
   end
 
+  # Follows the child's output on its way to the screen and answers one
+  # question: is the terminal's parser at rest right now?
+  #
+  # Painting the bar means writing our own escapes into that stream, and a pty
+  # master hands back at most a kilobyte per read - so a full redraw arrives as
+  # dozens of pieces split at arbitrary bytes, and a paint dropped into one of
+  # the seams breaks whatever it landed in the middle of:
+  #
+  #   * a sequence, leaving the introducer stranded and its tail printed as
+  #     text - the literal "[22m" on screen
+  #   * a UTF-8 character, which comes out as a replacement glyph
+  #   * a DECSC the child opened and has not closed yet. The terminal has one
+  #     save slot; we take it, and the child's own ESC8 then puts its cursor on
+  #     our bar and it draws the rest of the frame over the top. Claude Code
+  #     wraps every repaint in ESC7 ... ESC8, so this one is not theoretical.
+  #
+  # This is only ever asked about the *end* of what we have written so far, so
+  # there is no need to understand the sequences - just to know where they stop.
+  class OutScan
+    ESC = 0x1b
+    BEL = 0x07
+
+    # Escapes whose second byte is followed by exactly one more: SS3 (ESC O),
+    # the charset designators (ESC ( ) * +), and ESC # / ESC %.
+    ONE_MORE ||= [0x4f, 0x28, 0x29, 0x2a, 0x2b, 0x23, 0x25].freeze
+
+    # Runaway guards. A CSI this long, or a string payload this long, is a
+    # stream we have lost the thread of rather than a sequence still coming.
+    MAX_CSI ||= 128
+    MAX_STR ||= 8192
+
+    # Nothing outside these bytes can start a sequence or a multi-byte
+    # character, so a plain-text burst needs no walking at all.
+    INTERESTING ||= /[\e\x80-\xff]/n
+
+    def initialize
+      reset!
+    end
+
+    def reset!
+      @state = :text
+      @need  = 0     # UTF-8 continuation bytes still owed
+      @saved = 0     # ESC7 seen without its ESC8
+      @len   = 0
+    end
+
+    # True when the last byte written ended a sequence and a character, and the
+    # child is not holding a saved cursor.
+    def safe?
+      @state == :text && @need.zero? && @saved.zero?
+    end
+
+    def feed(bytes)
+      return if @state == :text && @need.zero? && !bytes.match?(INTERESTING)
+
+      bytes.each_byte { |b| step(b) }
+    end
+
+    # What is holding a paint back, for the debug trace.
+    def to_s
+      "#{@state} utf8=#{@need} saved=#{@saved}"
+    end
+
+    private
+
+    def step(byte)
+      case @state
+      when :text then text(byte)
+      when :esc  then escape(byte)
+      when :csi  then csi(byte)
+      when :one  then @state = :text
+      when :str  then string(byte)
+      when :st   then terminator(byte)
+      end
+    end
+
+    def text(byte)
+      return @state = :esc if byte == ESC
+      return @need = 0 if byte < 0x80
+
+      # A continuation byte only counts while one is owed; anything else is a
+      # lead byte, and a stray one just resets the count.
+      return @need -= 1 if @need.positive? && (byte & 0xc0) == 0x80
+
+      @need = case byte
+              when 0xc0..0xdf then 1
+              when 0xe0..0xef then 2
+              when 0xf0..0xf7 then 3
+              else 0
+              end
+    end
+
+    # The second byte says how the rest of the sequence ends. ESC7/ESC8 are the
+    # pair we care about beyond that - see the class comment.
+    def escape(byte)
+      @len = 0
+
+      case byte
+      when 0x5b          then @state = :csi
+      when *STRING_INTRO then @state = :str
+      when *ONE_MORE     then @state = :one
+      when ESC           then nil                     # ESC ESC: still :esc
+      else
+        # ESC7 saves the cursor and ESC8 restores it. Everything else that gets
+        # here is a two-byte escape, and is over.
+        @saved += 1 if byte == 0x37
+        @saved -= 1 if byte == 0x38 && @saved.positive?
+        @state = :text
+      end
+    end
+
+    def csi(byte)
+      @len += 1
+      return @state = :esc if byte == ESC       # aborted, a new one starting
+      return @state = :text if @len > MAX_CSI
+
+      @state = :text if byte >= 0x40 && byte <= 0x7e
+    end
+
+    # String payloads run to BEL or ST (ESC \).
+    def string(byte)
+      @len += 1
+      return @state = :st   if byte == ESC
+      return @state = :text if byte == BEL || @len > MAX_STR
+    end
+
+    def terminator(byte)
+      return if byte == ESC
+
+      @state = byte == 0x5c ? :text : :str
+    end
+  end
+
   # Rebuilds the line you are typing from the raw byte stream on its way to the
   # child, and keeps the last `keep` submitted lines.
   #
@@ -387,9 +581,6 @@ module LlmWrap
     BEL   = 0x07
     DEL   = 0x7f
 
-    # Introducers of the escape sequences that carry a string payload:
-    # OSC ], DCS P, SOS X, PM ^, APC _.
-    STRING_INTRO ||= [0x5d, 0x50, 0x58, 0x5e, 0x5f].freeze
     CTRL_C = 0x03
     CTRL_U = 0x15
     CTRL_W = 0x17

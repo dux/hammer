@@ -271,6 +271,81 @@ class WrapPtyTest < Minitest::Test
     inp&.close rescue nil
   end
 
+  # Pull the wrapper's own paints back out of the stream and return the child's
+  # output as it stood at each one - so a test can ask what the terminal was in
+  # the middle of when the bar was written.
+  def paint_seams(raw)
+    envelope = /\e7\e\[r.*?\e\[1;\d+r\e8/m
+    child    = +''.b
+    seams    = []
+    pos      = 0
+
+    while (m = envelope.match(raw, pos))
+      child << raw.byteslice(pos, m.begin(0) - pos)
+      seams << child.dup
+      pos = m.end(0)
+    end
+
+    seams
+  end
+
+  # A pty master hands back at most a kilobyte a read, so one redraw arrives as
+  # dozens of pieces split at arbitrary bytes - and the wrapper used to paint
+  # the bar into whichever seam it happened to be at when MAX_DEFER ran out.
+  # That leaves an escape introducer stranded (the literal "[22m" on screen),
+  # half a character (a replacement glyph), or the child's own saved cursor
+  # taken out from under it, which is what wrapping Claude Code through an
+  # interactive question looked like.
+  #
+  # Real output streams far too fast for those splits to be reproducible, so the
+  # child here stalls in each of the three states for longer than MAX_DEFER,
+  # which is what the wrapper sees either way.
+  CUT_SCRIPT = <<~'RB'
+    $stdout.sync = true
+    dash = "─".b
+    3.times do |n|
+      $stdout.write("\e[#{n + 1};1H\e[22m\e[38;5;")  # stalled inside a CSI
+      sleep 0.25
+      $stdout.write("245m row #{n} ")
+      $stdout.write(dash[0, 2])                      # stalled inside a character
+      sleep 0.25
+      $stdout.write(dash[2])
+      $stdout.write("\e7\e[10;1H saved ")            # stalled holding a DECSC
+      sleep 0.25
+      $stdout.write("\e8\e[0m")
+      sleep 0.25                                     # at rest, as a frame ends
+    end
+    sleep 1
+  RB
+
+  def test_the_bar_is_never_painted_into_the_middle_of_the_childs_output
+    out, inp, pid, read = spawn_wrap('--', 'ruby', '-e', CUT_SCRIPT)
+    sleep 3.5
+    raw = read.call.b
+    Process.kill('TERM', pid) rescue nil
+    Process.waitpid(pid) rescue nil
+
+    seams = paint_seams(raw)
+    assert_operator seams.size, :>=, 3, 'the bar should have been painted while output streamed'
+
+    # An unterminated CSI, or a bare ESC, immediately before a paint.
+    open_seq = seams.count { |s| s.match?(/(?:\e\[[\d;?]*|\e)\z/n) }
+    assert_equal 0, open_seq, 'a paint landed inside an escape sequence'
+
+    # The child writes nothing but valid UTF-8, so a prefix that does not decode
+    # is one a paint cut short.
+    split_char = seams.count { |s| !s.dup.force_encoding('UTF-8').valid_encoding? }
+    assert_equal 0, split_char, 'a paint landed inside a character'
+
+    # The terminal has one cursor save slot. Painting while the child holds it
+    # takes it, and the child's ESC8 then lands its cursor on the bar.
+    stolen = seams.count { |s| s.scan(/\e7/n).size != s.scan(/\e8/n).size }
+    assert_equal 0, stolen, 'a paint took the cursor the child had saved'
+  ensure
+    out&.close rescue nil
+    inp&.close rescue nil
+  end
+
   # Raw mode leaves ISIG off, so Ctrl-C is a plain 0x03 byte the child's own
   # line discipline turns into SIGINT. The wrapper must not take it.
   def test_ctrl_c_reaches_the_child_not_the_wrapper
