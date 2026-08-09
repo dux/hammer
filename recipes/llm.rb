@@ -42,10 +42,10 @@ task :usage do
     `~/.cache/llm/claude-limits.json`, falling back to the OAuth usage API. `month` shows
     Claude extra-usage credits (API only, and only when you've enabled them).
   D
-  example 'llm usage'
-  example 'llm usage month'
-  example 'llm usage --json'
-  example 'llm usage --provider grok'
+  example 'usage'
+  example 'usage month'
+  example 'usage --json'
+  example 'usage --provider grok'
 
   # :period is declared first on purpose — the parser fills un-set scalar opts
   # from positionals in declaration order, so `llm usage month` must reach
@@ -117,11 +117,11 @@ task :wrap do
     cannot be picked - so blanks and ---- rules group the list without being in the way.
     `--config` opens it in $EDITOR, writing a starting set the first time.
   D
-  example 'llm wrap'
-  example 'llm wrap --config'
-  example 'llm wrap claude'
-  example 'llm wrap -- claude --resume'
-  example 'llm wrap --lines 5 -- bash -l'
+  example 'wrap'
+  example 'wrap --config'
+  example 'wrap claude'
+  example 'wrap -- claude --resume'
+  example 'wrap --lines 5 -- bash -l'
 
   # `positional: false` is load-bearing: the parser fills un-set scalar opts
   # from positionals in declaration order, so without it `llm wrap claude`
@@ -213,7 +213,7 @@ namespace :memory do
 
   task :list do
     desc 'List stored memories with type and one-line description'
-    example 'llm memory list'
+    example 'memory list'
 
     proc do
       files = Dir[File.join(STORE, '*.md')].sort
@@ -233,7 +233,7 @@ namespace :memory do
 
   task :read do
     desc 'Print the full content of a memory (frontmatter + body)'
-    example 'llm memory read user-role'
+    example 'memory read user-role'
 
     proc do |opts|
       name = opts[:args].first
@@ -285,7 +285,7 @@ namespace :memory do
 
   task :delete do
     desc 'Delete a memory by name'
-    example 'llm memory delete old-fact'
+    example 'memory delete old-fact'
 
     proc do |opts|
       name = opts[:args].first
@@ -299,7 +299,7 @@ namespace :memory do
 
   task :search do
     desc 'Search memory bodies for a query string (case-insensitive)'
-    example 'llm memory search react'
+    example 'memory search react'
 
     proc do |opts|
       query = opts[:args].first
@@ -558,8 +558,8 @@ namespace :prompt do
 
   task :expand do
     desc 'Expand prompt token(s) and print the resulting context'
-    example 'llm prompt:expand :foo :bar'
-    example 'llm prompt:expand foo:'
+    example 'prompt:expand :foo :bar'
+    example 'prompt:expand foo:'
 
     proc do |opts|
       input = opts[:args].join(' ')
@@ -652,7 +652,7 @@ namespace :plan do
 
       Exit: 0 applied and green, 10 something needs you, 20 verify failed.
     D
-    example 'llm plan:apply ./tmp/plan-note-anchor.json'
+    example 'plan:apply ./tmp/plan-note-anchor.json'
 
     proc do |opts|
       bundle  = load_bundle(opts)
@@ -668,7 +668,7 @@ namespace :plan do
 
   task :check do
     desc 'Dry run: report what would apply and what has drifted, write nothing.'
-    example 'llm plan:check ./tmp/plan-note-anchor.json'
+    example 'plan:check ./tmp/plan-note-anchor.json'
 
     proc do |opts|
       outcome = LlmPlan::Runner.new(load_bundle(opts)).apply(check_only: true)
@@ -684,7 +684,7 @@ namespace :plan do
       For after you have closed a drift by hand, or fixed what a failing verify
       caught. Exit 0 green, 20 failed.
     D
-    example 'llm plan:verify ./tmp/plan-note-anchor.json'
+    example 'plan:verify ./tmp/plan-note-anchor.json'
 
     proc do |opts|
       exit run_verify(LlmPlan::Runner.new(load_bundle(opts))).ok ? 0 : 20
@@ -693,7 +693,7 @@ namespace :plan do
 
   task :revert do
     desc 'Undo an applied bundle from <slug>.bak: restore changed and deleted files, remove created ones.'
-    example 'llm plan:revert ./tmp/plan-note-anchor.json'
+    example 'plan:revert ./tmp/plan-note-anchor.json'
 
     proc do |opts|
       LlmPlan::Runner.new(load_bundle(opts)).revert.each { |path| say "  restored #{path}", :green }
