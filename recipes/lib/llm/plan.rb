@@ -24,6 +24,23 @@ require 'json'
 module LlmPlan
   Error = Class.new(StandardError)
 
+  class << self
+    # plan.md is the only copy of the prose: `llm plan` prints it whole, and
+    # the per-command help is composed from its sections.
+    def readme
+      @readme ||= File.read(File.join(__dir__, 'plan.md'))
+    end
+
+    # The body of one `## Section`, without its heading. Trims blank lines
+    # only - stripping whitespace would eat the first line's indentation and
+    # break the code blocks this composes into command help.
+    def section(title)
+      body = readme[/^## #{Regexp.escape(title)}\s*\n(.*?)(?=^## |\z)/m, 1]
+      raise Error, "plan.md has no '#{title}' section" unless body
+      body.sub(/\A\n+/, '').rstrip
+    end
+  end
+
   # One planned file operation, plus everything needed to decide whether the
   # world still looks the way the plan assumed.
   class Entry
@@ -45,6 +62,15 @@ module LlmPlan
     def hunks   = Array(@raw['hunks'])
     def content = @raw['content'].to_s
     def past    = PAST[op]
+
+    # The one-clause summary for the manifest. Falls back to the hunk intents,
+    # so a change usually needs no `note` of its own.
+    def note
+      given = @raw['note'].to_s.strip
+      return given unless given.empty?
+
+      hunks.filter_map { |hunk| hunk['intent'].to_s.strip if hunk['intent'] }.reject(&:empty?).join('; ')
+    end
 
     # sha1 of the file as it is right now, or nil when it is not there.
     def current_sha1
@@ -102,9 +128,55 @@ module LlmPlan
       nil
     end
 
+    # The file as the hunks would leave it: [body, nil], or [nil, reason] when
+    # an anchor will not resolve. Only meaningful for a change.
+    def preview
+      @preview ||= resolve_preview
+    end
+
+    # Resolves the hunks and throws the result away, so a bad anchor - which is
+    # a planning bug, not drift - surfaces while the plan can still be fixed.
+    def dry_apply
+      return nil unless op == 'change'
+
+      preview.last
+    end
+
+    # [added, removed] line counts. Multiset-wise: a line that only moved
+    # counts as neither, which reads better in a summary than a positional
+    # diff would. Zero for anything that cannot be resolved.
+    def delta
+      case op
+      when 'create' then [content.lines.size, 0]
+      when 'delete' then [0, File.file?(abs) ? File.read(abs).lines.size : 0]
+      else
+        body, = preview
+        body ? line_delta(File.read(abs), body) : [0, 0]
+      end
+    end
+
     private
 
     def abs = File.expand_path(path, @root)
+
+    def resolve_preview
+      body = File.read(abs)
+
+      hunks.each do |hunk|
+        body, reason = splice(body, hunk)
+        return [nil, reason] if reason
+      end
+
+      [body, nil]
+    end
+
+    def line_delta(old_body, new_body)
+      before = old_body.lines.tally
+      after  = new_body.lines.tally
+
+      [after.sum  { |line, n| [n - before.fetch(line, 0), 0].max },
+       before.sum { |line, n| [n - after.fetch(line, 0), 0].max }]
+    end
 
     def validate!
       raise Error, 'file entry without a path'                if path.empty?
@@ -320,7 +392,12 @@ module LlmPlan
 
         reason = entry.drift_reason
         next drifted.push(Drifted.new(entry, reason)) if reason
-        next applied.push(Applied.new(entry, 'would apply')) if check_only
+
+        if check_only
+          problem = entry.dry_apply
+          next drifted.push(Drifted.new(entry, problem)) if problem
+          next applied.push(Applied.new(entry, 'would apply'))
+        end
 
         failure = entry.apply!(@backup)
 
@@ -352,14 +429,139 @@ module LlmPlan
     def revert = @backup.restore!
   end
 
-  # Turns an Outcome into lines of [text, color] for the CLI to print. Kept
-  # apart from Runner so the wording is testable without a terminal.
-  class Report
+  # The grouped, sorted view of what a bundle would do: the answer to "what am
+  # I approving?". Holds no formatting - both renderers read it.
+  class Manifest
+    GROUPS = { 'create' => 'Created', 'change' => 'Changed', 'delete' => 'Deleted' }.freeze
+
+    Group = Struct.new(:op, :title, :files, :problems)
+    Row   = Struct.new(:path, :note, :added, :removed)
+
     def initialize(outcome)
       @outcome = outcome
     end
 
+    def goal             = @outcome.bundle.goal
+    def verify_commands  = @outcome.bundle.verify_commands
+    def clean?           = @outcome.drifted.empty?
+
+    def groups
+      @groups ||= GROUPS.filter_map do |op, title|
+        files    = rows_for(op)
+        problems = @outcome.drifted.select { |drifted| drifted.entry.op == op }.sort_by { |d| d.entry.path }
+        next if files.empty? && problems.empty?
+
+        Group.new(op, title, files, problems)
+      end
+    end
+
+    # Columns at which the clause and the counts start, so rows line up.
+    # Problem rows share the path column, or they run into their own message.
+    def width
+      @width ||= (groups.flat_map { |group| group.files.map(&:path) + group.problems.map { |d| d.entry.path } }
+                        .map(&:length).max || 0) + 4
+    end
+
+    def note_width
+      @note_width ||= (groups.flat_map(&:files).map { |file| file.note.length }.max || 0) + 4
+    end
+
+    # "+23 -45" over every file in the plan.
+    def totals
+      files = groups.flat_map(&:files)
+      [files.sum(&:added), files.sum(&:removed)]
+    end
+
+    def tally
+      ready    = @outcome.applied.size + @outcome.skipped.size
+      problems = @outcome.drifted.size
+      added, removed = totals
+      counted  = "#{count(ready, 'file')}, +#{added} -#{removed}"
+      return "#{counted}, anchors resolve" if problems.zero?
+
+      "#{counted}, #{count(problems, 'problem')} - fix the plan before \"go\""
+    end
+
+    private
+
+    def rows_for(op)
+      ready = @outcome.applied.map(&:entry).select { |entry| entry.op == op }
+                      .map { |entry| row_for(entry, entry.note) }
+      done  = @outcome.skipped.select { |entry| entry.op == op }
+                      .map { |entry| row_for(entry, [entry.note, '(already applied)'].reject(&:empty?).join(' ')) }
+
+      (ready + done).sort_by(&:path)
+    end
+
+    def row_for(entry, note)
+      added, removed = entry.delta
+      Row.new(entry.path, note, added, removed)
+    end
+
+    def count(number, noun)
+      "#{number} #{noun}#{'s' unless number == 1}"
+    end
+  end
+
+  # The manifest as markdown, for pasting into a reply. The file list goes in a
+  # ```diff fence: a renderer colours those rows by their leading sign, which
+  # is the only way to get green and red into pasted markdown.
+  class MarkdownReport
+    SIGNS = { 'create' => '+', 'change' => '!', 'delete' => '-' }.freeze
+
+    def initialize(outcome)
+      @manifest = Manifest.new(outcome)
+    end
+
+    def to_s = lines.join("\n")
+
     def lines
+      rows = []
+      rows << "**#{@manifest.goal}**" << '' unless @manifest.goal.empty?
+
+      rows << '```diff'
+      @manifest.groups.each do |group|
+        sign = SIGNS[group.op]
+        group.files.each { |file| rows << "#{sign} #{columns(file)}" }
+        group.problems.each { |drifted| rows << "! #{drifted.entry.path.ljust(@manifest.width)}PROBLEM #{drifted.reason}" }
+      end
+      rows << '```' << ''
+
+      rows << "verify: #{@manifest.verify_commands.map { |cmd| "`#{cmd}`" }.join(', ')}" if @manifest.verify_commands.any?
+      rows << @manifest.tally
+      rows
+    end
+
+    private
+
+    def columns(file)
+      "#{file.path.ljust(@manifest.width)}#{file.note.ljust(@manifest.note_width)}+#{file.added} -#{file.removed}"
+    end
+  end
+
+  # Turns an Outcome into lines of [text, color] for the CLI to print. Kept
+  # apart from Runner so the wording is testable without a terminal.
+  class Report
+    # Colour per operation, so a group reads at a glance.
+    OP_COLORS = { 'create' => :green, 'change' => :yellow, 'delete' => :red }.freeze
+    PLAIN     = ->(text, _color) { text }
+
+    # `paint` is injected rather than imported: the terminal owns colour, this
+    # class only says which words deserve it, and tests read plain strings.
+    def initialize(outcome, paint: PLAIN)
+      @outcome  = outcome
+      @manifest = Manifest.new(outcome)
+      @paint    = paint
+    end
+
+    def lines
+      @outcome.check_only? ? manifest : result
+    end
+
+    private
+
+    # What a run did, in the past tense.
+    def result
       rows = []
       @outcome.applied.each { |applied| rows << ["  ok    #{applied.entry.path} (#{applied.note})", :green] }
       @outcome.skipped.each { |entry|   rows << ["  ok    #{entry.path} (already applied)", :gray] }
@@ -370,7 +572,43 @@ module LlmPlan
       rows
     end
 
-    private
+    # What a run would do, for a human to approve. One line per file, grouped
+    # and sorted, each with its own clause. Never counts of lines touched -
+    # that says nothing about whether the change is the right one.
+    def manifest
+      rows = []
+
+      @manifest.groups.each do |group|
+        rows << [paint(group.title, OP_COLORS[group.op]), nil]
+        rows.concat group.files.map { |file| [file_row(file), nil] }
+
+        group.problems.each_with_index do |drifted, index|
+          rows << ['', nil] unless index.zero? && group.files.empty?
+          rows << ["  #{paint("PROBLEM #{drifted.entry.path}", :red)}", nil]
+          rows << ["  #{paint(drifted.reason, :yellow)}", nil]
+        end
+
+        rows << ['', nil]
+      end
+
+      commands = @manifest.verify_commands
+      rows << ["#{paint('verify:', :magenta)} #{commands.join(', ')}", :gray] if commands.any?
+      rows << [@manifest.tally, @manifest.clean? ? :green : :red]
+      rows
+    end
+
+    # "  ./path        clause        +3 -1", padded before painting so the
+    # invisible escape codes never throw the columns off.
+    def file_row(file)
+      ['  ',
+       paint(file.path.ljust(@manifest.width), :cyan),
+       file.note.ljust(@manifest.note_width),
+       paint("+#{file.added}", :green),
+       ' ',
+       paint("-#{file.removed}", :red)].join
+    end
+
+    def paint(text, color) = @paint.call(text, color)
 
     def drift_block(drifted)
       entry = drifted.entry
@@ -403,7 +641,7 @@ module LlmPlan
     def summary
       done = @outcome.applied.size + @outcome.skipped.size
       rows = [["  #{done} applied, #{@outcome.drifted.size} needs you", nil]]
-      return rows if @outcome.check_only? || !@outcome.touched?
+      return rows unless @outcome.touched?
 
       rows << ["  backup: #{@outcome.bundle.backup_dir}/", :gray]
       rows << ["  revert: llm plan:revert #{@outcome.bundle.path}", :gray]

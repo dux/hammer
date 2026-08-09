@@ -275,7 +275,7 @@ class LlmPlanTest < Minitest::Test
   def test_check_only_writes_nothing_and_omits_the_revert_hint
     write 'keep.rb', "old line\n"
     bundle  = bundle(files: [change('./keep.rb', [hunk('old line', 'new line')])])
-    outcome = LlmPlan::Runner.new(bundle, root: @root).apply(check_only: true)
+    outcome = run_check(bundle)
 
     assert_equal 1, outcome.applied.size
     assert_equal "old line\n", read('keep.rb')
@@ -283,8 +283,120 @@ class LlmPlanTest < Minitest::Test
     refute_match(/llm plan:revert/, report_text(outcome))
   end
 
+  # --- summary ------------------------------------------------------------
+
+  def test_summary_groups_and_sorts_by_path
+    write 'keep.rb', "old line\n"
+    write 'gone.rb', "bye\n"
+
+    lines = report_text(run_check(mixed_bundle(extra: [create_entry('./aaa.rb')]))).lines.map(&:strip)
+    shape = lines.grep(%r{\A(Created|Changed|Deleted|\./)}).map { |line| line.split(/\s{2,}/).first }
+
+    assert_equal ['Created', './aaa.rb', './new.rb', 'Changed', './keep.rb', 'Deleted', './gone.rb'], shape
+  end
+
+  def test_summary_uses_the_note_and_falls_back_to_hunk_intents
+    write 'keep.rb', "old line\n"
+    files = [create_entry('./new.rb').merge('note' => 'anchor model'),
+             change('./keep.rb', [hunk('old line', 'new line', intent: 'rename the line')])]
+
+    text = report_text(run_check(bundle(files: files)))
+
+    assert_match(%r{\./new\.rb\s+anchor model}, text)
+    assert_match(%r{\./keep\.rb\s+rename the line}, text)
+  end
+
+  def test_summary_carries_the_verify_commands_and_the_totals
+    text = report_text(run_check(bundle(verify: ['rake test'], files: [create_entry])))
+
+    assert_match(/verify: rake test/, text)
+    assert_match(/1 file, \+1 -0, anchors resolve/, text)
+  end
+
+  def test_line_counts_are_per_file
+    write 'keep.rb', "a\nb\nc\n"
+    files = [create_entry.merge('content' => "one\ntwo\n"),
+             change('./keep.rb', [hunk("b\n", "B\nB2\n")])]
+
+    text = report_text(run_check(bundle(files: files)))
+
+    assert_match(%r{\./new\.rb\s+\+2 -0}, text)
+    assert_match(%r{\./keep\.rb\s+\+2 -1}, text)
+    assert_match(/2 files, \+4 -1/, text)
+  end
+
+  def test_a_moved_line_counts_as_neither
+    write 'keep.rb', "a\nb\n"
+    text = report_text(run_check(bundle(files: [change('./keep.rb', [hunk("a\nb\n", "b\na\n")])])))
+
+    assert_match(/1 file, \+0 -0/, text)
+  end
+
+  def test_paint_is_injected_and_off_by_default
+    painted = []
+    outcome = run_check(bundle(files: [create_entry]))
+
+    plain   = LlmPlan::Report.new(outcome).lines.map(&:first).join("\n")
+    colored = LlmPlan::Report.new(outcome, paint: ->(text, color) { painted << color; text })
+                             .lines.map(&:first).join("\n")
+
+    assert_equal plain, colored
+    assert_includes painted, :green
+    assert_includes painted, :red
+    assert_includes painted, :cyan
+  end
+
+  def test_markdown_summary_is_a_diff_fence_signed_by_operation
+    write 'keep.rb', "old line\n"
+    write 'gone.rb', "bye\n"
+
+    text = LlmPlan::MarkdownReport.new(run_check(mixed_bundle)).to_s
+
+    assert_match(/\A\*\*test goal\*\*\n/, text)
+    assert_match(/^```diff$/, text)
+    assert_match(%r{^\+ \./new\.rb\s+\S}, text)
+    assert_match(%r{^! \./keep\.rb\s+rename the line\s+\+1 -1$}, text)
+    assert_match(%r{^- \./gone\.rb\s+\+0 -1$}, text)
+    refute_match(/[{}"]|slug|sha1/, text)
+  end
+
+  def test_markdown_summary_marks_problems_in_the_fence
+    write 'a.rb', "dup\ndup\n"
+    text = LlmPlan::MarkdownReport.new(run_check(bundle(files: [change('./a.rb', [hunk('dup', 'one')])]))).to_s
+
+    assert_match(%r{^! \./a\.rb\s+PROBLEM anchor matched 2 times}, text)
+    assert_match(/1 problem/, text)
+  end
+
+  def test_check_catches_an_unresolvable_anchor_before_apply
+    write 'a.rb', "dup\ndup\n"
+    outcome = run_check(bundle(files: [change('./a.rb', [hunk('dup', 'one')])]))
+
+    assert_equal 1, outcome.drifted.size
+    assert_match(/matched 2 times/, outcome.drifted.first.reason)
+    assert_equal 10, outcome.exit_code
+
+    text = report_text(outcome)
+    assert_match(%r{PROBLEM \./a\.rb}, text)
+    assert_match(/1 problem - fix the plan before "go"/, text)
+  end
+
   def test_applied_report_carries_the_revert_hint
     assert_match(/llm plan:revert/, report_text(run_apply(bundle(files: [create_entry]))))
+  end
+
+  # --- readme -------------------------------------------------------------
+
+  # llm.rb composes command help out of these, so a renamed heading in
+  # plan.md would break `llm plan:apply --help` at load time.
+  def test_readme_keeps_the_sections_the_command_help_composes_from
+    ['The bundle', 'Drift', 'Exit codes'].each do |title|
+      refute_empty LlmPlan.section(title), "empty section: #{title}"
+    end
+  end
+
+  def test_unknown_readme_section_is_an_error
+    assert_error(/no 'Nope' section/) { LlmPlan.section('Nope') }
   end
 
   private
@@ -311,12 +423,14 @@ class LlmPlanTest < Minitest::Test
       'sha1' => sha1 || self.sha1(path.sub(%r{\A\./}, '')) }
   end
 
-  def create_entry = { 'path' => './new.rb', 'op' => 'create', 'content' => "new file\n" }
+  def create_entry(path = './new.rb')
+    { 'path' => path, 'op' => 'create', 'content' => "new file\n" }
+  end
 
-  def mixed_bundle
+  def mixed_bundle(extra: [])
     bundle(files: [create_entry,
                    change('./keep.rb', [hunk('old line', 'new line', intent: 'rename the line')]),
-                   { 'path' => './gone.rb', 'op' => 'delete', 'sha1' => sha1('gone.rb') }])
+                   { 'path' => './gone.rb', 'op' => 'delete', 'sha1' => sha1('gone.rb') }] + extra)
   end
 
   # Writes a bundle file under <root>/tmp and returns the parsed Bundle.
@@ -330,6 +444,7 @@ class LlmPlanTest < Minitest::Test
   end
 
   def run_apply(bundle) = LlmPlan::Runner.new(bundle, root: @root).apply
+  def run_check(bundle) = LlmPlan::Runner.new(bundle, root: @root).apply(check_only: true)
 
   def report_text(outcome)
     LlmPlan::Report.new(outcome).lines.map(&:first).join("\n")

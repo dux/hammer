@@ -596,6 +596,19 @@ namespace :prompt do
   end
 end
 
+# The namespace's sibling task: `llm plan` explains the thing, `llm plan:*`
+# does it. The command list underneath is hammer's own, not a copy.
+task :plan do
+  desc 'How the /plan bundle apply works: logic, bundle format, exit codes'
+  example 'plan'
+
+  proc do
+    say LlmPlan.readme
+    say ''
+    self.class.print_help 'plan:'
+  end
+end
+
 namespace :plan do
   # Helpers live inside the namespace block for the same reason as :memory -
   # a top-level `helpers do` lands on the root class, which namespaces do not
@@ -610,8 +623,11 @@ namespace :plan do
     error e.message
   end
 
+  # Hammer owns colour (and turns it off for a non-tty), so hand its painter
+  # to the report rather than teaching the report about ANSI.
   def render(outcome)
-    LlmPlan::Report.new(outcome).lines.each { |text, color| say text, color }
+    report = LlmPlan::Report.new(outcome, paint: Hammer::Shell.method(:paint))
+    report.lines.each { |text, color| say text, color }
   end
 
   def run_verify(runner)
@@ -621,37 +637,11 @@ namespace :plan do
   end
 
   task :apply do
-    desc <<~D
-      Apply a /plan bundle: sha1-checked edits now, drift handed back to you.
-
-      The bundle is JSON written at planning time, normally ./tmp/plan-[SLUG].json:
-
-        { "slug": "note-anchor",
-          "goal":   "one line, why this change exists",
-          "commit": { "subject": "...", "body": "..." },
-          "verify": ["bundle exec rspec spec/note_spec.rb"],
-          "files": [
-            { "path": "./a.rb", "op": "create", "content": "..." },
-            { "path": "./b.rb", "op": "change", "sha1": "<shasum at plan time>",
-              "hunks": [{ "intent": "why", "old": "...", "new": "...", "all": false }] },
-            { "path": "./c.rb", "op": "delete", "sha1": "<shasum at plan time>" }
-          ] }
-
-      Every change and delete carries the sha1 its target had when the plan was
-      written; a create carries none, and its check is "must not exist". Files
-      that still match are applied without being re-read. Files that moved on
-      are printed with their intent and their wanted old/new text, for you to
-      apply by hand - that is the normal path, not an error.
-
-      A file is only written once all of its hunks resolve, writes are atomic,
-      and every touched file is copied to <slug>.bak first. Re-running a bundle
-      that already landed is a no-op. `verify` runs only when nothing drifted.
-
-      Side effects, next to the bundle: <slug>.bak/ (undo) and <slug>.msg
-      (commit message, for `git commit -F`). Committing is never automatic.
-
-      Exit: 0 applied and green, 10 something needs you, 20 verify failed.
-    D
+    # Composed from plan.md rather than written out again - see `llm plan`.
+    desc ['Apply a /plan bundle: sha1-checked edits now, drift handed back to you.',
+          "The bundle, normally ./tmp/plan-[SLUG].json:\n\n#{LlmPlan.section('The bundle')}",
+          LlmPlan.section('Drift'),
+          LlmPlan.section('Exit codes')].join("\n\n")
     example 'plan:apply ./tmp/plan-note-anchor.json'
 
     proc do |opts|
@@ -667,12 +657,16 @@ namespace :plan do
   end
 
   task :check do
-    desc 'Dry run: report what would apply and what has drifted, write nothing.'
+    desc ['Dry run: the summary to read before approving a plan. Writes nothing.',
+          LlmPlan.section('Summary')].join("\n\n")
     example 'plan:check ./tmp/plan-note-anchor.json'
+    example 'plan:check --md ./tmp/plan-note-anchor.json'
+
+    opt :md, type: :boolean, desc: 'emit the summary as markdown, to paste into a reply'
 
     proc do |opts|
       outcome = LlmPlan::Runner.new(load_bundle(opts)).apply(check_only: true)
-      render outcome
+      opts[:md] ? puts(LlmPlan::MarkdownReport.new(outcome).to_s) : render(outcome)
       exit outcome.exit_code
     end
   end
