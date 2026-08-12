@@ -455,11 +455,10 @@ module LlmPlan
       end
     end
 
-    # Columns at which the clause and the counts start, so rows line up.
-    # Problem rows share the path column, or they run into their own message.
+    # Columns at which the clause and the counts start, so rows line up. Taken
+    # from every planned path, so problem rows share the column too.
     def width
-      @width ||= (groups.flat_map { |group| group.files.map(&:path) + group.problems.map { |d| d.entry.path } }
-                        .map(&:length).max || 0) + 4
+      @width ||= (@outcome.bundle.entries.map { |entry| entry.path.length }.max || 0) + 4
     end
 
     def note_width
@@ -560,16 +559,26 @@ module LlmPlan
 
     private
 
-    # What a run did, in the past tense.
+    # What a run did, in the past tense. Sorted by path, same as the manifest -
+    # a landed list is read the same way a planned one is.
     def result
       rows = []
-      @outcome.applied.each { |applied| rows << ["  ok    #{applied.entry.path} (#{applied.note})", :green] }
-      @outcome.skipped.each { |entry|   rows << ["  ok    #{entry.path} (already applied)", :gray] }
-      rows << ['', nil] if rows.any? && @outcome.drifted.any?
+      landed = @outcome.applied.map { |applied| [applied.entry, applied.note] } +
+               @outcome.skipped.map { |entry| [entry, 'already applied'] }
+
+      unless landed.empty?
+        rows << [paint('Landed', :green), nil]
+        landed.sort_by { |entry, _| entry.path }.each { |entry, note| rows << [landed_row(entry, note), nil] }
+        rows << ['', nil]
+      end
 
       @outcome.drifted.each { |drifted| rows.concat drift_block(drifted) }
       rows.concat summary
       rows
+    end
+
+    def landed_row(entry, note)
+      "  #{paint(entry.path.ljust(@manifest.width), :cyan)}#{paint(note, :gray)}"
     end
 
     # What a run would do, for a human to approve. One line per file, grouped

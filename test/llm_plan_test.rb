@@ -385,6 +385,16 @@ class LlmPlanTest < Minitest::Test
     assert_match(/llm plan:revert/, report_text(run_apply(bundle(files: [create_entry]))))
   end
 
+  def test_landed_files_are_sorted_by_path
+    write 'keep.rb', "old line\n"
+    write 'gone.rb', "bye\n"
+
+    lines = report_text(run_apply(mixed_bundle(extra: [create_entry('./aaa.rb')]))).lines.map(&:strip)
+    shape = lines.grep(%r{\A(Landed|\./)}).map { |line| line.split(/\s{2,}/).first }
+
+    assert_equal ['Landed', './aaa.rb', './gone.rb', './keep.rb', './new.rb'], shape
+  end
+
   # --- readme -------------------------------------------------------------
 
   # llm.rb composes command help out of these, so a renamed heading in
