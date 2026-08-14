@@ -66,18 +66,22 @@ class WrapPtyTest < Minitest::Test
     [out, inp, pid, -> { buf.dup }]
   end
 
-  # The bar from the last complete paint, top to bottom: [rule, ...prompts].
-  # A paint is the whole ESC7 ESC[r ... ESC[1;<child_rows>r ESC8 envelope, so
-  # this asserts that shape too - and it deliberately ignores the teardown,
-  # which addresses the first bar row last in order to erase it.
-  def bar_rows(raw, keep: 3)
-    child  = ROWS - (keep + 1)
+  # The bar from the last complete paint, top to bottom: [rule, ...rows]. A
+  # paint is the whole ESC7 ESC[r ... ESC[1;<child_rows>r ESC8 envelope, so this
+  # asserts that shape too - and it deliberately ignores the teardown, which
+  # addresses the first bar row last in order to erase it.
+  #
+  # The height comes out of the paint rather than from `keep`: a ! command's
+  # output makes the bar as tall as it needs to be.
+  def bar_rows(raw)
     paints = raw.dup.force_encoding('UTF-8').scrub('')
-                .scan(/\e7\e\[r(.*?)\e\[1;#{child}r\e8/m)
+                .scan(/\e7\e\[r(.*?)\e\[1;(\d+)r\e8/m)
     return [] if paints.empty?
 
-    last = paints.last[0]
-    (1..(keep + 1)).map do |i|
+    last, child = paints.last
+    child       = child.to_i
+
+    (1..(ROWS - child)).map do |i|
       last[/\e\[#{child + i};1H\e\[K(.*?)(?=\e\[\d+;1H|\z)/m, 1]
         .to_s.gsub(/\e\[[\d;?]*[a-zA-Z]/, '').strip
     end
@@ -138,10 +142,10 @@ class WrapPtyTest < Minitest::Test
 
   def test_lines_option_pins_that_many
     raw, = wrap('--lines', '4', '--', 'cat', keys: %W[a\r b\r c\r d\r e\r])
-    assert_equal ['❯ b', '❯ c', '❯ d', '❯ e'], bar_rows(raw, keep: 4)[1..]
+    assert_equal ['❯ b', '❯ c', '❯ d', '❯ e'], bar_rows(raw)[1..]
 
     raw, = wrap('--lines', '1', '--', 'cat', keys: ["only\r"])
-    assert_equal ['❯ only'], bar_rows(raw, keep: 1)[1..]
+    assert_equal ['❯ only'], bar_rows(raw)[1..]
   end
 
   # `positional: false` on the opt - without it the parser hands "cat" to
@@ -182,6 +186,65 @@ class WrapPtyTest < Minitest::Test
     raw, = wrap('--', 'ruby', '-e', script, keys: ["hunter2\r", "visible\r"])
     refute_includes raw, 'hunter2'
     assert_equal '❯ visible', bar_rows(raw).last
+  end
+
+  # -- ! lines -------------------------------------------------------------
+  #
+  # A child that answers everything it is given, so anything reaching it shows
+  # up in what the wrapper wrote back.
+  ECHOER = 'while read -r line; do echo "CHILD[$line]"; done'
+
+  def test_a_bang_line_never_reaches_the_child
+    raw, = wrap('--', 'bash', '-c', ECHOER, keys: ["!echo hi\r"])
+    refute_includes visible(raw), 'CHILD[', 'the child heard the line'
+  end
+
+  def test_a_double_bang_hands_the_line_back
+    raw, = wrap('--', 'bash', '-c', ECHOER, keys: ["!!echo hi\r"])
+    assert_includes visible(raw), 'CHILD[!echo hi]'
+  end
+
+  def test_output_lands_in_the_bar_under_the_pwd_and_the_command
+    raw, = wrap('--', 'cat', keys: ["!echo hello-there\r"])
+    rows = bar_rows(raw)
+    assert_includes rows[0], ' shell '
+    assert_equal Dir.pwd.sub(Dir.home, '~'), rows[1]
+    assert_equal '! echo hello-there',       rows[2]
+    assert_equal 'hello-there',              rows[3]
+  end
+
+  def test_a_failure_says_so_on_the_rule
+    raw, = wrap('--', 'cat', keys: ["!exit 3\r"])
+    assert_includes bar_rows(raw)[0], 'shell - exit 3'
+  end
+
+  # The bar takes the rows it needs and the child's screen gives them up, which
+  # is the whole reason the output survives the child's next repaint.
+  def test_the_bar_grows_for_the_output_and_the_child_shrinks
+    raw, = wrap('--', 'cat', keys: ["!printf 'a\\nb\\nc\\nd\\n'\r"])
+    assert_includes raw, "\e[1;#{ROWS - 7}r", 'rule, pwd, command and four rows'
+    assert_equal %w[a b c d], bar_rows(raw)[3..]
+  end
+
+  # Nothing else on screen shows a ! line, so the bar has to, cursor and all.
+  def test_the_line_being_typed_is_shown_while_it_is_typed
+    raw, = wrap('--', 'cat', keys: ['!git status'])
+    assert_equal '! git status', bar_rows(raw).last
+  end
+
+  def test_a_bare_bang_puts_the_prompt_history_back
+    raw, = wrap('--', 'cat', keys: ["hello\r", "!echo x\r", "!\r"])
+    rows = bar_rows(raw)
+    assert_includes rows[0], ' prompt history '
+    assert_equal '❯ hello', rows.last
+  end
+
+  # The next keystroke wants the screen more than the last command does.
+  def test_typing_clears_the_output
+    raw, = wrap('--', 'cat', keys: ["hello\r", "!echo x\r", 'a qu'])
+    rows = bar_rows(raw)
+    assert_includes rows[0], ' prompt history '
+    assert_equal '❯ hello', rows.last, 'the history is back before the Enter'
   end
 
   # -- process behaviour ---------------------------------------------------

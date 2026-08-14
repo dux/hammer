@@ -100,6 +100,17 @@ task :wrap do
     inserts for you (history recall, autocomplete, menu picks) will not show up, and
     nothing is captured while the program has echo off in canonical mode (sudo, ssh).
 
+    A line starting with ! is taken over: nothing reaches the wrapped program, the line
+    runs in $SHELL here, and the bar grows to show where it ran, what ran and what it
+    printed. That is a shell round trip instead of a tool call, a permission check and a
+    model turn - and it costs no context either, since the agent is never told.
+
+    Output stays up until you type anything at all, and a bare ! clears it too. Long
+    output is cut to the rows there are, and a command still running after 10s is killed,
+    since the wrapper is stopped while one runs. `cd` is handled here so that it sticks,
+    and moves nothing but the wrapper. Type !! to send a literal ! to the program instead,
+    which is how you reach Claude Code's own bash mode; a leading space does the same.
+
     Keys are decoded from plain bytes, the kitty keyboard protocol and xterm
     modifyOtherKeys, since a program can ask the terminal for any of the three (Claude
     Code turns on the last two). Mouse reports, focus events, arrows and Ctrl-<key> are

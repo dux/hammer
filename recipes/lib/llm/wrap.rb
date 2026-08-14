@@ -17,6 +17,12 @@ require 'shellwords'
 # so text the program inserts for you (history recall, autocomplete, menu
 # picks) never shows up - that is the price of working with any program at all.
 #
+# A line starting with ! is taken over: it never reaches the child at all, it
+# runs in a shell here, and its output is shown in the bar (Bang, Pane). The
+# round trip that saves is the point - `!git status` typed at an agent is a
+# tool call, a permission check and a model turn for something the shell
+# answers in milliseconds, and this way it costs no context either.
+#
 # Wrapping a program hides it: the child lives on our PTY, in its own session,
 # so anything outside looking at the terminal sees this process and not the
 # program. Terminals that watch what is running in a pane - Herdr naming a tab,
@@ -44,6 +50,10 @@ module LlmWrap
   # giving up and taking one - see Session#paint.
   DRAIN_MAX ||= 262_144
   MAX_BLOCK ||= 1.5
+
+  # The bar grows to show ! output, and this is what it may never take: the
+  # child keeps at least this many rows whatever the output was.
+  MIN_CHILD ||= 5
 
   # Introducers of the escape sequences that carry a string payload:
   # OSC ], DCS P, SOS X, PM ^, APC _. They run to BEL or ST rather than to a
@@ -97,6 +107,87 @@ module LlmWrap
       [(lflag & ECHO) != 0, (lflag & ICANON) != 0]
     rescue SystemCallError, IOError, ArgumentError
       nil
+    end
+  end
+
+  # Drawing shared by everything that puts a row in the bar: the prompt history
+  # and the ! output pane.
+  module Text
+    CYAN   = "\e[36m"
+    YELLOW = "\e[33m"
+    DIM    = "\e[2m"
+    GRAY   = "\e[38;5;245m"
+    REV    = "\e[7m"
+    RESET  = "\e[0m"
+
+    # Dashed, and deliberately not the solid U+2500 "─" it wants to be.
+    #
+    # A pane watcher works out where a program's own furniture is by looking for
+    # the last solid rule on the screen: Herdr hangs its "the prompt box is
+    # here" and "the permission dialog is here" regions off it. Our bar is below
+    # everything, so a solid rule down here becomes the last one and those
+    # regions land on the prompt history instead - detection then sees no prompt
+    # and no dialog, and the pane reads as neither idle nor blocked. Any glyph
+    # that is not box-drawing keeps the bar out of that reckoning; a dashed rule
+    # is also a fair signal that this row is not part of the program above.
+    RULE ||= '┄'
+
+    # Roughly the double-width ranges of UEAW - enough to keep CJK and emoji
+    # from overflowing the bar without pulling in a character-width gem.
+    WIDE ||= [
+      0x1100..0x115f, 0x2e80..0x303e, 0x3041..0x33ff, 0x3400..0x4dbf,
+      0x4e00..0x9fff, 0xa000..0xa4cf, 0xac00..0xd7a3, 0xf900..0xfaff,
+      0xfe30..0xfe6f, 0xff00..0xff60, 0xffe0..0xffe6,
+      0x1f300..0x1f64f, 0x1f900..0x1f9ff, 0x20000..0x2fffd
+    ].freeze
+    ZERO ||= [0xfe00..0xfe0f, 0x200b..0x200f].freeze
+
+    private
+
+    # A full-width rule with the label centred in it, marking off the bar from
+    # whatever the wrapped program is drawing above it.
+    def rule(cols, label)
+      return '' if cols <= 0
+
+      label = " #{label} "
+      pad   = cols - width(label)
+      return "#{GRAY}#{RULE * cols}#{RESET}" if pad < 2
+
+      left = pad / 2
+      "#{GRAY}#{RULE * left}#{label}#{RULE * (pad - left)}#{RESET}"
+    end
+
+    def dim(text)
+      "#{DIM}#{text}#{RESET}"
+    end
+
+    def clip(text, cells)
+      return '' if cells <= 0
+      return text if width(text) <= cells
+
+      out  = +''
+      used = 0
+      text.each_char do |ch|
+        w = char_width(ch)
+        break if used + w > cells - 1
+
+        out << ch
+        used += w
+      end
+      out << '…'
+    end
+
+    def width(text)
+      text.each_char.sum { |ch| char_width(ch) }
+    end
+
+    def char_width(char)
+      cp = char.ord
+      return 0 if cp == 0x200d || ZERO.any? { |r| r.cover?(cp) }
+
+      WIDE.any? { |r| r.cover?(cp) } ? 2 : 1
+    rescue RangeError
+      1
     end
   end
 
@@ -218,6 +309,7 @@ module LlmWrap
       @origin   = origin
       @bar_rows = keep + 1     # the prompts, plus the rule above them
       @keys     = KeyBuffer.new(keep)
+      @pane     = nil          # the last ! command's output, while one is up
       @out      = OutScan.new
       @winch    = false
       @dirty    = true
@@ -324,8 +416,11 @@ module LlmWrap
     # child holding a saved cursor across this point would lose it - drawing
     # only once output has settled makes that vanishingly rare in practice.
     def draw_bar
+      lines = bar_lines
+      resize_bar(lines.size)
+
       out = +"\e7\e[r"
-      @keys.lines(@cols).each_with_index do |line, i|
+      lines.first(@bar_rows).each_with_index do |line, i|
         out << "\e[#{child_rows + 1 + i};1H\e[K" << line
       end
       out << "\e[1;#{child_rows}r\e8"
@@ -333,6 +428,37 @@ module LlmWrap
 
       @dirty    = false
       @drawn_at = now
+    end
+
+    # The prompt history, or the last ! command's output while one is up. Both
+    # are painted the same way; only the number of rows differs.
+    def bar_lines
+      @pane ? @pane.lines(@cols, max_bar) : @keys.lines(@cols)
+    end
+
+    def max_bar
+      [@rows - MIN_CHILD, 2].max
+    end
+
+    # A taller bar moves the line the child ends on, so the scroll region and
+    # the child's own idea of the screen have to move with it. Rows handed back
+    # still have our text on them and the child has no reason to touch them
+    # until it repaints, so clear them on the way out.
+    def resize_bar(rows)
+      rows = rows.clamp(1, max_bar)
+      return if rows == @bar_rows
+
+      back      = @bar_rows - rows      # positive when the bar shrinks
+      @bar_rows = rows
+
+      if back.positive?
+        out = +"\e7\e[r"
+        (child_rows - back + 1..child_rows).each { |row| out << "\e[#{row};1H\e[K" }
+        emit out << "\e8"
+      end
+
+      set_region
+      resize_child   # the kernel SIGWINCHes the child, which repaints itself
     end
 
     def emit(str)
@@ -366,10 +492,27 @@ module LlmWrap
         ready[0].each do |io|
           if io.equal?($stdin)
             data = slurp($stdin) or return
-            @pty_in.write(data)
             taking = capture?
-            @dirty = true if taking && @keys.feed(data)
+
+            # KeyBuffer decides what the child is allowed to see: everything,
+            # unless a ! line is being typed, which is ours from the ! to the
+            # Enter. Nothing is captured at all while the child is asking for a
+            # password, and then it gets the bytes untouched.
+            if taking
+              @dirty = true if @keys.feed(data)
+              @pty_in.write(@keys.pass) unless @keys.pass.empty?
+            else
+              @pty_in.write(data)
+            end
+
             trace_in(data, taking)
+
+            # After the trace, so the log shows the line that ran before its
+            # output arrives, and after the write, so nothing waits on a shell.
+            if taking
+              @keys.bangs.each { |cmd| run_bang(cmd) }
+              close_pane if @keys.typing?
+            end
           else
             data = drain(@pty_out) or return
             $stdout.write(data)
@@ -387,6 +530,35 @@ module LlmWrap
       end
     rescue Errno::EIO, Errno::EPIPE, EOFError
       nil
+    end
+
+    # A ! line never went to the child, so this is the whole of it: run it here
+    # and put the result in the bar. A bare ! puts the bar back to the prompt
+    # history, which is how you close the output without running anything.
+    #
+    # The pump is stopped while the shell runs, which is why Bang keeps a
+    # deadline on it. The command is painted before it runs so a slow one does
+    # not look like a hung terminal.
+    def run_bang(cmd)
+      return close_pane if cmd.empty?
+
+      @pane  = Bang.pending(cmd)
+      @dirty = true
+      paint
+
+      @pane = Bang.run(cmd)
+      trace('BANG', "#{cmd.inspect} -> exit=#{@pane.status.inspect} #{@pane.note}")
+      @dirty = true
+      paint
+    end
+
+    # The first keystroke of the next line takes the screen back: the output was
+    # for the question you were about to ask, and now you are asking it.
+    def close_pane
+      return unless @pane
+
+      @pane  = nil
+      @dirty = true
     end
 
     def slurp(io)
@@ -623,6 +795,195 @@ module LlmWrap
     end
   end
 
+  # What a ! command left behind, as rows for the bar.
+  #
+  # It stays on this side of the wrapper. Nothing is typed into the child, so
+  # the output is not in the transcript and not in the model's context - and it
+  # is not painted over either, because these rows are outside the child's
+  # screen by construction, the same trick that keeps the prompt history safe.
+  class Pane
+    include Text
+
+    LABEL ||= 'shell'
+
+    attr_reader :cmd, :pwd, :out, :status, :note
+
+    def initialize(cmd, out: [], status: nil, note: nil)
+      @cmd    = cmd
+      @pwd    = Dir.pwd
+      @out    = out
+      @status = status
+      @note   = note
+    end
+
+    # Where it ran, what ran, then what it printed - under a rule saying whose
+    # rows these are. `max` is everything the bar is allowed to take.
+    #
+    # The command keeps the ! you typed rather than wearing a shell's $: it is
+    # the same row you were just looking at while typing it, and the bar is a
+    # record of what you typed.
+    def lines(cols, max)
+      head = [dim(clip(tilde(@pwd), cols)),
+              "#{YELLOW}!#{RESET} #{clip(@cmd, cols - 2)}"]
+      body = @out.empty? ? [dim('(no output)')] : @out.map { |line| clip(line, cols) }
+
+      [rule(cols, label)] + head + fit(body, max - 1 - head.size)
+    end
+
+    private
+
+    def label
+      bits = [LABEL]
+      bits << "exit #{@status}" if @status.to_i.positive?
+      bits << @note if @note
+      bits.join(' - ')
+    end
+
+    # Long output is cut from the bottom. The bar is a few rows and not a pager:
+    # what is worth reading here a command says first, and anything else is a
+    # pipe into head or a file away.
+    def fit(rows, room)
+      return rows if rows.size <= room
+      return [] if room < 1
+
+      rows.first(room - 1) << dim("… +#{rows.size - room + 1} more lines")
+    end
+
+    def tilde(path)
+      home = Dir.home
+      path.start_with?("#{home}/") || path == home ? path.sub(home, '~') : path
+    end
+  end
+
+  # Runs a ! line, here, instead of handing it to the agent.
+  module Bang
+    # A ! line is meant to be quick, and the pump is stopped while it runs: no
+    # keys reach the child and the screen does not repaint. Anything slower than
+    # this wants to be a real terminal, or the agent's own tools.
+    TIMEOUT ||= 10
+    MAX_OUT ||= 65_536
+    READ    ||= 4096
+
+    # `cd` on its own, with nothing that would need a shell to work out. Every !
+    # line gets a fresh shell, so a cd inside one dies with it and the pwd row
+    # above the output would be a lie the moment you tried. Do it here instead.
+    # This moves us and nothing else: the agent has its own working directory
+    # and we are not reaching into it.
+    CD ||= /\Acd(?:\s+(?<path>[^|&;<>()`$\n]*\S))?\z/
+
+    # Yours, non-interactive - so zsh syntax works, but ~/.zshrc is not read and
+    # your aliases and functions are not there. Loading it per line would cost
+    # more than the round trip this is here to save.
+    def self.shell
+      sh = ENV['SHELL'].to_s
+      sh.empty? ? '/bin/sh' : sh
+    end
+
+    def self.pending(cmd)
+      Pane.new(cmd, note: 'running')
+    end
+
+    def self.run(cmd)
+      cmd = cmd.strip
+      (m = CD.match(cmd)) ? chdir(cmd, m[:path]) : capture(cmd)
+    end
+
+    def self.chdir(cmd, path)
+      prev = Dir.pwd
+      Dir.chdir(target(path))
+      @back = prev
+      Pane.new(cmd, status: 0)
+    rescue SystemCallError => e
+      Pane.new(cmd, out: [e.message], status: 1)
+    end
+
+    def self.target(path)
+      case path
+      when nil then Dir.home
+      when '-' then @back || Dir.pwd
+      else File.expand_path(path)
+      end
+    end
+
+    def self.capture(cmd)
+      out  = String.new(encoding: Encoding::BINARY)
+      note = nil
+      # No keyboard: our stdin is the terminal, in raw mode, and a command that
+      # reads it would be taking the keystrokes meant for the agent. Anything
+      # wanting input is not a ! line.
+      io = IO.popen([shell, '-c', cmd], in: File::NULL, err: %i[child out], pgroup: true)
+      till = clock + TIMEOUT
+
+      loop do
+        # Waiting on the pipe and not on the process: a command that forks and
+        # leaves the pipe open (`something &`) holds this until the deadline,
+        # and then it is stopped like anything else that overstayed.
+        left = till - clock
+        if left <= 0 || !IO.select([io], nil, nil, left)
+          note = "timed out after #{TIMEOUT}s"
+          break
+        end
+
+        begin
+          out << io.readpartial(READ)
+        rescue EOFError
+          break
+        end
+
+        note = 'output cut' if out.bytesize >= MAX_OUT
+        break if note
+      end
+
+      stop(io) if note
+      Pane.new(cmd, out: rows(out), status: close(io), note: note)
+    rescue SystemCallError, IOError => e
+      Pane.new(cmd, out: [e.message], status: 1, note: 'did not run')
+    end
+
+    # Whatever it is doing, it does not get to outlive the line that started it -
+    # the wrapper is not pumping keys while it lives. TERM first, then insist,
+    # and the whole group because a shell -c is usually not the only process.
+    def self.stop(io)
+      Process.kill('TERM', -io.pid)
+      sleep 0.05
+      Process.kill('KILL', -io.pid)
+    rescue SystemCallError
+      nil
+    end
+
+    def self.close(io)
+      io.close
+      $?&.exitstatus
+    rescue SystemCallError, IOError
+      nil
+    end
+
+    def self.clock
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    # Output as bar rows: no escape sequences left to fight with our own colour
+    # or walk the cursor out of the pane, and tabs where a terminal would put
+    # them. The trailing newline every command ends with is not a blank row.
+    def self.rows(bytes)
+      text = bytes.dup.force_encoding(Encoding::UTF_8).scrub('')
+      out  = text.gsub(/\e\[[\d;?]*[ -\/]*[@-~]|\e[\]P^_X].*?(?:\a|\e\\)|\e./m, '')
+                 .split("\n", -1)
+                 .map { |line| untab(line).gsub(/[\x00-\x1f\x7f]/, '') }
+
+      out.pop while !out.empty? && out.last.empty?
+      out
+    end
+
+    def self.untab(line)
+      return line unless line.include?("\t")
+
+      line.each_char.with_object(+'') do |ch, out|
+        ch == "\t" ? out << ' ' * (8 - (out.length % 8)) : out << ch
+      end
+    end
+  end
+
   # Rebuilds the line you are typing from the raw byte stream on its way to the
   # child, and keeps the last `keep` submitted lines.
   #
@@ -630,10 +991,13 @@ module LlmWrap
   # reads can split a UTF-8 character or an escape sequence, so bytes are
   # accumulated in a binary buffer and only decoded when rendered.
   class KeyBuffer
+    include Text
+
     MAX_LEN     ||= 4096
     NO_PROMPTS  ||= '(nothing typed yet)'
     LABEL       ||= 'prompt history'
 
+    BANG  = 0x21
     CR    = 0x0d
     LF    = 0x0a
     ESC   = 0x1b
@@ -658,33 +1022,52 @@ module LlmWrap
     # CSI 27 ; <mods> ; <code> ~   (xterm modifyOtherKeys)
     XTERM_KEY ||= /\A\e\[27;(\d+);(\d+)~\z/
 
-    # Roughly the double-width ranges of UEAW - enough to keep CJK and emoji
-    # from overflowing the bar without pulling in a character-width gem.
-    WIDE ||= [
-      0x1100..0x115f, 0x2e80..0x303e, 0x3041..0x33ff, 0x3400..0x4dbf,
-      0x4e00..0x9fff, 0xa000..0xa4cf, 0xac00..0xd7a3, 0xf900..0xfaff,
-      0xfe30..0xfe6f, 0xff00..0xff60, 0xffe0..0xffe6,
-      0x1f300..0x1f64f, 0x1f900..0x1f9ff, 0x20000..0x2fffd
-    ].freeze
-    ZERO ||= [0xfe00..0xfe0f, 0x200b..0x200f].freeze
-
     def initialize(keep)
       @keep    = keep
       @prompts = []
       @buf     = binary
       @esc     = nil
       @paste   = false
+      @bang    = false
+      @bangs   = []
+      @pass    = binary
+      @hold    = binary
     end
+
+    # What the last feed decided, for the pump:
+    #
+    #   pass    the bytes the child is allowed to see. Everything, until a line
+    #           starts with !, and then nothing until that line is done with.
+    #   bangs   ! lines submitted in it, in order. An empty one is a bare !.
+    #   typing? there is a line on the go, so the screen is wanted for it.
+    attr_reader :pass, :bangs
+
+    def typing? = !@buf.empty?
+    def bang?   = @bang
 
     # The line being typed right now, for the debug trace.
     def pending
       decode(@buf)
     end
 
-    # Returns true when the pinned prompts changed.
+    # Returns true when what the bar shows changed.
     def feed(bytes)
-      changed = false
-      bytes.each_byte { |b| changed = true if @esc ? escape(b) : plain(b) }
+      @pass    = binary
+      @hold    = binary
+      @bangs   = []
+      changed  = false
+
+      bytes.each_byte do |b|
+        @hold << b
+        was = @bang
+        hit = @esc ? escape(b) : plain(b)
+        # A ! line redraws on every keystroke: the bar is the only place it is
+        # shown, so it has to keep up the way an input box would.
+        changed = true if hit || @bang || was
+        release unless @esc
+      end
+
+      release   # a sequence still arriving: the child waits no longer than today
       changed
     end
 
@@ -704,39 +1087,29 @@ module LlmWrap
         end
       end
 
-      [rule(cols)] + rows
+      rows[-1] = typing(cols) if @bang
+      [rule(cols, LABEL)] + rows
     end
 
     private
 
-    CYAN  = "\e[36m"
-    DIM   = "\e[2m"
-    GRAY  = "\e[38;5;245m"
-    RESET = "\e[0m"
+    # A ! line is not going anywhere near the child, so nothing else on screen
+    # is showing it: this row is the only place you can see what you are typing,
+    # cursor included. It takes the newest prompt's row, which comes back the
+    # moment the line is run or dropped.
+    def typing(cols)
+      text = decode(@buf).delete_prefix('!').lstrip
+      "#{YELLOW}!#{RESET} #{clip(text, cols - 4)}#{REV} #{RESET}"
+    end
 
-    # Dashed, and deliberately not the solid U+2500 "─" it wants to be.
-    #
-    # A pane watcher works out where a program's own furniture is by looking for
-    # the last solid rule on the screen: Herdr hangs its "the prompt box is
-    # here" and "the permission dialog is here" regions off it. Our bar is below
-    # everything, so a solid rule down here becomes the last one and those
-    # regions land on the prompt history instead - detection then sees no prompt
-    # and no dialog, and the pane reads as neither idle nor blocked. Any glyph
-    # that is not box-drawing keeps the bar out of that reckoning; a dashed rule
-    # is also a fair signal that this row is not part of the program above.
-    RULE ||= '┄'
+    # Bytes reach the child unless a ! line is holding them back. @swallow
+    # carries the Enter that ended one, which is ours and not the child's.
+    def release
+      return if @hold.empty?
 
-    # A full-width rule with the label centred in it, marking off the bar from
-    # whatever the wrapped program is drawing above it.
-    def rule(cols)
-      return '' if cols <= 0
-
-      label = " #{LABEL} "
-      pad   = cols - width(label)
-      return "#{GRAY}#{RULE * cols}#{RESET}" if pad < 2
-
-      left = pad / 2
-      "#{GRAY}#{RULE * left}#{label}#{RULE * (pad - left)}#{RESET}"
+      @pass << @hold unless @bang || @swallow
+      @swallow = false
+      @hold    = binary
     end
 
     def binary
@@ -748,7 +1121,7 @@ module LlmWrap
       when ESC          then @esc = binary << byte; false
       when CR, LF       then @paste ? (append("\n"); false) : submit
       when DEL, BS      then chop_char; false
-      when CTRL_U, CTRL_C then @buf = binary; false
+      when CTRL_U, CTRL_C then clear_line; false
       when CTRL_W       then drop_word; false
       when TAB          then false   # completion text is inserted by the app
       else
@@ -841,7 +1214,7 @@ module LlmWrap
       # image in Claude Code, which puts no typed text on the wire at all.
       if bits & CTRL != 0
         case code
-        when 117, 99 then @buf = binary              # ctrl-u, ctrl-c
+        when 117, 99 then clear_line                 # ctrl-u, ctrl-c
         when 119     then drop_word                  # ctrl-w
         end
         return false
@@ -865,11 +1238,46 @@ module LlmWrap
     end
 
     def append_byte(byte)
+      return if byte == BANG && !bang_char
+
       @buf << byte if @buf.bytesize < MAX_LEN
     end
 
     def append(str)
+      return if str == '!' && !bang_char
+
       @buf << str.b if @buf.bytesize < MAX_LEN
+    end
+
+    # A ! in the first column is ours: from here to Enter nothing reaches the
+    # child and the line runs in a shell instead. Typed twice it is handed back,
+    # so `!!ls` arrives at the agent as `!ls` and its own bash mode is still
+    # there when that is what you wanted. A leading space is the other way out.
+    #
+    # False when the character has been dealt with and must not be appended.
+    def bang_char
+      if @bang && @buf == '!'.b
+        @bang = false      # the second !: this one is the child's, and the
+        return false       # buffer is already holding a ! for it
+      end
+
+      @bang = true if @buf.empty? && !@paste
+      true
+    end
+
+    def clear_line
+      end_bang
+      @buf = binary
+    end
+
+    # Ending a ! line takes the keystroke that ended it along: a backspace or a
+    # ctrl-c that cancelled one was editing our line and not the child's, and a
+    # ctrl-c in particular would interrupt the agent over nothing.
+    def end_bang
+      return unless @bang
+
+      @bang    = false
+      @swallow = true
     end
 
     # Drop one whole character: back over any UTF-8 continuation bytes first.
@@ -879,6 +1287,7 @@ module LlmWrap
       i = @buf.bytesize - 1
       i -= 1 while i.positive? && (@buf.getbyte(i) & 0xc0) == 0x80
       @buf.slice!(i..)
+      end_bang if @buf.empty?
     end
 
     # Readline's unix-word-rubout: eat trailing whitespace, then the word, and
@@ -886,17 +1295,33 @@ module LlmWrap
     def drop_word
       @buf.sub!(/\s+\z/, '')
       @buf.sub!(/\S+\z/, '')
+      end_bang if @buf.empty?
     end
 
     def submit
       text = decode(@buf)
-      @buf = binary
+      bang = @bang
+      raw  = @buf
+      clear_line
+
+      # A ! line is not a prompt: it was never said to the agent, so it has no
+      # business in a history of what was.
+      if bang
+        @bangs << command(raw)
+        return true
+      end
 
       return false if text.empty? || @prompts.first == text
 
       @prompts.unshift(text)
       @prompts.pop while @prompts.size > @keep
       true
+    end
+
+    # The line as a shell should see it, which is not how the bar sees it:
+    # newlines are separators a shell understands and must survive whole.
+    def command(bytes)
+      bytes.dup.force_encoding(Encoding::UTF_8).scrub('').strip.delete_prefix('!').strip
     end
 
     # A bar row is one line, so a multi-line prompt - a continuation with
@@ -909,35 +1334,6 @@ module LlmWrap
 
       text.gsub(/[^\S\n]+/, ' ')        # runs of spaces/tabs, newlines kept
           .gsub(/ ?\n+ ?/) { '\ ' }     # block form: no backslash escaping here
-    end
-
-    def clip(text, cells)
-      return '' if cells <= 0
-      return text if width(text) <= cells
-
-      out  = +''
-      used = 0
-      text.each_char do |ch|
-        w = char_width(ch)
-        break if used + w > cells - 1
-
-        out << ch
-        used += w
-      end
-      out << '…'
-    end
-
-    def width(text)
-      text.each_char.sum { |ch| char_width(ch) }
-    end
-
-    def char_width(char)
-      cp = char.ord
-      return 0 if cp == 0x200d || ZERO.any? { |r| r.cover?(cp) }
-
-      WIDE.any? { |r| r.cover?(cp) } ? 2 : 1
-    rescue RangeError
-      1
     end
   end
 end

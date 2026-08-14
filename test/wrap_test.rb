@@ -298,6 +298,246 @@ class WrapKeyBufferTest < Minitest::Test
   end
 end
 
+# A ! line belongs to the wrapper and not to the program it is wrapping: the
+# keystrokes stop here, the shell runs it, and the output goes in the bar. So
+# the thing to check is mostly what the child is allowed to see.
+class WrapBangTest < Minitest::Test
+  KB    = LlmWrap::KeyBuffer
+  KITTY = ->(s) { s.each_char.map { |c| "\e[#{c.ord}u" }.join }
+
+  def buffer(keep = 2)
+    KB.new(keep)
+  end
+
+  # `pass` is per-feed, so chunk-by-chunk runs have to be added up the way the
+  # pump adds them up: it writes what each feed released.
+  def feed(kb, *chunks)
+    @passed ||= +''
+    chunks.each do |c|
+      kb.feed(c.b)
+      @passed << kb.pass
+    end
+    kb
+  end
+
+  # What the child would have received, as text.
+  def passed = @passed.to_s.dup.force_encoding(Encoding::UTF_8)
+
+  def bar(kb, cols = 60)
+    kb.lines(cols).map { |line| line.gsub(/\e\[[\d;]*m/, '') }
+  end
+
+  def newest(kb, cols = 60) = bar(kb, cols).last
+
+  # -- what the child sees -------------------------------------------------
+
+  def test_a_bang_line_never_reaches_the_child
+    kb = feed(buffer, '!git status -sb', "\r")
+    assert_equal '', passed, 'the Enter is ours too'
+    assert_equal ['git status -sb'], kb.bangs
+  end
+
+  def test_everything_else_still_reaches_the_child_untouched
+    kb = feed(buffer, 'hello', "\r")
+    assert_equal "hello\r", passed
+    assert_empty kb.bangs
+  end
+
+  def test_bang_only_counts_in_the_first_column
+    kb = feed(buffer, 'wow', '!', "\r")
+    assert_equal "wow!\r", passed
+    assert_empty kb.bangs
+    assert_equal '❯ wow!', newest(kb)
+  end
+
+  def test_a_second_bang_hands_the_line_back_to_the_agent
+    kb = feed(buffer, '!!ls')
+    assert_equal '!ls', passed, 'the agent gets one ! and its own bash mode'
+    feed(kb, "\r")
+    assert_empty kb.bangs
+    assert_equal '❯ !ls', newest(kb)
+  end
+
+  def test_a_leading_space_is_the_other_way_out
+    kb = feed(buffer, ' !ls', "\r")
+    assert_equal " !ls\r", passed
+    assert_empty kb.bangs
+  end
+
+  def test_a_bare_bang_is_a_command_to_close_the_output
+    assert_equal [''], feed(buffer, '!', "\r").bangs
+  end
+
+  def test_bang_is_recognised_under_the_kitty_protocol
+    kb = feed(buffer, "\e[33u", KITTY['ls'], "\e[13u")
+    assert_equal '', passed
+    assert_equal ['ls'], kb.bangs
+  end
+
+  def test_a_pasted_bang_is_not_one
+    kb = feed(buffer, "\e[200~!ls\e[201~", "\r")
+    assert_empty kb.bangs
+    assert_equal '❯ !ls', newest(kb)
+    assert_includes passed, '!ls'
+  end
+
+  # -- getting out of one --------------------------------------------------
+
+  def test_backspacing_the_bang_away_gives_the_keyboard_back
+    kb = feed(buffer, '!ab', "\x7f\x7f\x7f")
+    assert_equal '', passed, 'the backspace that ended it was ours as well'
+    feed(kb, 'x')
+    assert_equal 'x', passed, 'an empty line is no longer a ! line'
+  end
+
+  def test_ctrl_c_cancels_a_bang_line_without_reaching_the_child
+    kb = feed(buffer, '!rm -rf /', "\x03")
+    assert_equal '', passed, 'a ctrl-c here would interrupt the agent'
+    assert_empty kb.bangs
+    refute kb.bang?
+  end
+
+  # -- the bar -------------------------------------------------------------
+
+  def test_a_bang_line_is_not_a_prompt
+    kb = feed(buffer, "!ls\r")
+    assert_equal '(nothing typed yet)', newest(kb),
+                 'it was never said to the agent, so it is not history'
+  end
+
+  def test_the_line_being_typed_is_shown_because_nothing_else_shows_it
+    kb = feed(buffer, 'first', "\r", '!git st')
+    assert kb.bang?
+    assert_equal '! git st ', newest(kb), 'marker, the line, and a block cursor'
+    assert kb.feed('a'.b), 'every keystroke redraws it'
+  end
+
+  def test_the_newest_prompt_comes_back_when_the_line_is_dropped
+    kb = feed(buffer, "first\r", '!ls')
+    assert_equal '! ls ', newest(kb)
+    assert kb.feed("\x15".b), 'dropping it redraws too'
+    assert_equal '❯ first', newest(kb)
+  end
+
+  # What the output pane is closed on: the moment there is a line on the go,
+  # the screen is wanted for that and not for the last command.
+  def test_typing_reports_a_line_on_the_go
+    kb = feed(buffer, "!ls\r")
+    refute kb.typing?, 'a ! line that has run leaves nothing behind'
+    feed(kb, 'w')
+    assert kb.typing?
+    feed(kb, "\x7f")
+    refute kb.typing?
+    feed(kb, '!')
+    assert kb.typing?, 'starting the next ! line counts too'
+  end
+
+  def test_inner_spacing_survives_into_the_command
+    assert_equal ['ls   -la'], feed(buffer, "!ls   -la\r").bangs
+  end
+end
+
+# Running the thing. These shell out, which is the point of them.
+class WrapBangRunTest < Minitest::Test
+  Bang = LlmWrap::Bang
+
+  def test_output_and_exit_status_are_kept
+    pane = Bang.run('echo hi')
+    assert_equal ['hi'], pane.out
+    assert_equal 0, pane.status
+  end
+
+  def test_stderr_is_output_too
+    assert_equal ['bad'], Bang.run('echo bad >&2').out
+  end
+
+  def test_a_failure_keeps_its_status
+    assert_equal 3, Bang.run('exit 3').status
+  end
+
+  # Our stdin is the terminal in raw mode. A command reading it would be eating
+  # the keystrokes meant for the agent, and this one would hang until the
+  # deadline instead of returning at once.
+  def test_a_command_gets_no_keyboard
+    assert_empty Bang.run('cat').out
+  end
+
+  def test_cd_moves_the_wrapper_and_nothing_else
+    here = Dir.pwd
+    Dir.mktmpdir do |dir|
+      real = File.realpath(dir)
+      assert_equal 0, Bang.run("cd #{dir}").status
+      assert_equal real, Dir.pwd
+      assert_equal here, Bang.run('cd -').pwd, 'the pane says where it ran'
+      assert_equal here, Dir.pwd
+    end
+  ensure
+    Dir.chdir(here)
+  end
+
+  def test_a_bad_cd_is_reported_not_raised
+    here = Dir.pwd
+    pane = Bang.run('cd /no/such/place/at/all')
+    assert_equal 1, pane.status
+    assert_equal here, Dir.pwd
+  end
+
+  # Colour and cursor moves in the output would fight with the bar's own, and
+  # a stray control byte can walk the cursor out of it entirely.
+  def test_escape_sequences_and_control_bytes_are_stripped
+    assert_equal ['red'], Bang.rows("\e[31mred\e[0m\n".b)
+    assert_equal ['ab'],  Bang.rows("a\x07b\n".b)
+  end
+
+  def test_tabs_land_on_tab_stops
+    assert_equal ['a       b'], Bang.rows("a\tb\n".b)
+  end
+
+  def test_the_trailing_newline_is_not_a_blank_row
+    assert_equal %w[a b], Bang.rows("a\nb\n".b)
+    assert_equal ['a', '', 'b'], Bang.rows("a\n\nb\n".b), 'but the ones inside are'
+  end
+end
+
+# The rows a ! command leaves in the bar: where it ran, what ran, what it said.
+class WrapPaneTest < Minitest::Test
+  def pane(cmd = 'ls', **args) = LlmWrap::Pane.new(cmd, **args)
+
+  def rows(pane, cols = 40, max = 10)
+    pane.lines(cols, max).map { |line| line.gsub(/\e\[[\d;]*m/, '') }
+  end
+
+  def test_pwd_then_command_then_output
+    out = rows(pane('ls', out: %w[one two]))
+    assert_includes out.first, ' shell '
+    assert_equal Dir.pwd.sub(Dir.home, '~'), out[1]
+    assert_equal '! ls', out[2], 'the command as you typed it, not as a shell would'
+    assert_equal %w[one two], out[3..]
+  end
+
+  def test_a_failure_says_so_in_the_rule
+    assert_includes rows(pane('false', status: 1)).first, 'shell - exit 1'
+    assert_includes rows(pane('sleep 60', note: 'timed out after 10s')).first, 'timed out'
+  end
+
+  def test_silence_is_reported_rather_than_left_blank
+    assert_equal '(no output)', rows(pane('true', status: 0)).last
+  end
+
+  def test_long_output_is_cut_to_the_room_there_is
+    out = rows(pane('ls', out: (1..20).map(&:to_s)), 40, 6)
+    assert_equal 6, out.size
+    assert_equal %w[1 2], out[3..4]
+    assert_equal '… +18 more lines', out.last
+  end
+
+  def test_rows_are_clipped_to_the_width
+    out = rows(pane('ls', out: ['x' * 200]), 30)
+    assert_equal 30, out.last.length
+    assert_equal '…', out.last[-1]
+  end
+end
+
 # LlmWrap::OutScan watches the child's output go past and says whether the
 # terminal's parser is at rest, which is the only moment the bar may be painted.
 #
