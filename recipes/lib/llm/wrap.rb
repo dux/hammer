@@ -1135,6 +1135,31 @@ module LlmWrap
     # bracketed-paste markers.
     def escape(byte)
       @esc << byte
+      intro = @esc.getbyte(1)
+
+      # String sequences run to BEL or ST (ESC \) rather than a final byte, and
+      # carry a payload of printable text. They are the terminal answering a
+      # question the program asked - Codex queries the fg/bg colour on startup
+      # and gets back "\e]10;rgb:cdcd/d6d6/f4f4\e\\" - so the whole thing is
+      # dropped. Treating them as CSI would spill that payload into the prompt.
+      # An ESC in here is the start of that ST, so this goes before the resync.
+      if @esc.bytesize > 2 && STRING_INTRO.include?(intro)
+        @esc = nil if byte == BEL || (byte == 0x5c && @esc.getbyte(-2) == ESC)
+        @esc = nil if @esc && @esc.bytesize > 1024  # unterminated: cut losses
+        return false
+      end
+
+      # An ESC part-way through a sequence never belongs to it: the one being
+      # collected was abandoned and a new one starts here. That is the ordinary
+      # shape of a bare Escape keypress followed by any other key - the terminal
+      # sends "\e" and then the next key's own sequence - and of a read that
+      # split one sequence off the end of another. Resync rather than give up:
+      # dropping the state would leave the rest of the new sequence to arrive as
+      # plain bytes, and "\e[27;1:3u" would land in the prompt as "[27;1:3u".
+      if byte == ESC
+        @esc = binary << byte
+        return false
+      end
 
       if @esc.bytesize == 2
         case byte
@@ -1143,19 +1168,6 @@ module LlmWrap
         when CR, LF        then @esc = nil; append("\n"); return false # Option+Enter
         else @esc = nil; return false
         end
-      end
-
-      intro = @esc.getbyte(1)
-
-      # String sequences run to BEL or ST (ESC \) rather than a final byte, and
-      # carry a payload of printable text. They are the terminal answering a
-      # question the program asked - Codex queries the fg/bg colour on startup
-      # and gets back "\e]10;rgb:cdcd/d6d6/f4f4\e\\" - so the whole thing is
-      # dropped. Treating them as CSI would spill that payload into the prompt.
-      if STRING_INTRO.include?(intro)
-        @esc = nil if byte == BEL || (byte == 0x5c && @esc.getbyte(-2) == ESC)
-        @esc = nil if @esc && @esc.bytesize > 1024  # unterminated: cut losses
-        return false
       end
 
       if intro == 0x4f                             # SS3 is always three bytes
@@ -1169,7 +1181,9 @@ module LlmWrap
         return csi(seq)
       end
 
-      @esc = nil if @esc.bytesize > 32             # runaway guard
+      # Lost the thread of it. Keep swallowing to the final byte rather than
+      # dropping the state, for the same reason as the resync above.
+      @esc = @esc.byteslice(0, 2) if @esc.bytesize > 32
       false
     end
 

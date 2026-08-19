@@ -139,6 +139,22 @@ class WrapKeyBufferTest < Minitest::Test
     assert_equal '❯ héllo', newest(feed(buffer, bytes[0, 2], bytes[2..], "\r"))
   end
 
+  # A bare Escape keypress is one byte with nothing after it, so the next key's
+  # sequence starts against a half-collected one. Giving up on the old sequence
+  # there used to let the whole of the new one through as text: backspacing a
+  # character put "[27;1:3u" in the prompt instead of taking the character out.
+  def test_escape_sequence_after_a_dangling_escape
+    assert_equal '❯ deploy', newest(feed(buffer, 'deplo', "\e", "\e[27;1:3u", "y\r"))
+    assert_equal '❯ deploy', newest(feed(buffer, 'deplo', "\e\e[27;1:3u", "y\r"))
+    assert_equal '❯ a',      newest(feed(buffer, 'ab', "\e", "\e[127u", "\r"))
+  end
+
+  # A CSI long past anything real is a stream we have lost the thread of, and it
+  # still has to be swallowed to its final byte rather than spilled.
+  def test_runaway_csi_does_not_spill
+    assert_equal '❯ abcd', newest(feed(buffer, 'ab', "\e[#{'1;' * 200}m", "cd\r"))
+  end
+
   # -- kitty keyboard protocol ---------------------------------------------
 
   def test_kitty_plain_typing
