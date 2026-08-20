@@ -53,6 +53,31 @@ class InputTest < Minitest::Test
     end
   end
 
+  def test_attach_stdin_is_lazy
+    with_stdin('hello') do
+      opts = {}
+      Hammer::Input.attach_stdin!(opts)
+      refute opts.key?(:stdin), 'stdin read before anyone asked'
+      assert_equal 0, $stdin.pos
+      assert_equal 'hello', opts[:stdin]
+      assert opts.key?(:stdin), 'first lookup should memoise'
+      assert_nil opts[:other]
+    end
+  end
+
+  def test_read_stdin_idle_socket_is_nil
+    require 'socket'
+    ours, theirs = UNIXSocket.pair
+    $stdin = ours
+    assert_nil Hammer::Input.read_stdin
+    theirs.write('late')
+    theirs.close
+    assert_equal 'late', Hammer::Input.read_stdin
+  ensure
+    ours&.close
+    theirs&.close unless theirs&.closed?
+  end
+
   def test_prepare_json_from_inline_string
     opts = { json: '{"name":"Ship"}' }
     Hammer::Input.prepare_json!(opts)

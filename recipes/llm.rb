@@ -337,7 +337,9 @@ TODO_GUIDE ||= <<~TXT
   Per-project task queue in ./LLM_TODO.local.md - workable by humans and any agent.
 
   Human usage:
-    llm todo:add "fix login redirect"   queue a task (pipe stdin for bulk / multi-line)
+    llm todo:add "fix login redirect"   queue a task; pipe stdin for bulk:
+                                        `* ` bullets delimit tasks (multi-line ok),
+                                        no bullets at all = one task per line
     llm todo:list                       tasks by id, counts, format warnings
     llm todo:pop + llm todo:done        take / finish a single task by hand
 
@@ -491,9 +493,10 @@ namespace :todo do
     desc <<~DESC
       Add task(s) to ./#{TODO_FILE} (created on first add).
 
-      Text comes from the argument (one task), or from stdin - there a `*` at
-      the start of a line begins a new task and following lines belong to it,
-      so multi-line tasks and whole lists can be piped in at once.
+      Text comes from the argument (one task), or from stdin. Piped input
+      that has `*` / `-` bullets is a list: a bullet begins a task and the
+      lines under it belong to it, so multi-line tasks and whole lists can be
+      piped in at once. Input with no bullets at all is one task per line.
     DESC
     example 'todo add "migrate the user model to Sequel"'
     example 'cat tasks.md | llm todo add'
@@ -503,17 +506,19 @@ namespace :todo do
       # unquoted multi-word input lands in :text + :args - join it back
       arg = [opts[:text], *opts[:args]].compact.join(' ').strip
       if arg.empty?
+        lines     = opts[:stdin].to_s.split("\n")
+        bulleted  = lines.any? { |l| l =~ /^[-*]\s+/ }
         new_tasks = []
-        opts[:stdin].to_s.split("\n").each do |line|
+        lines.each do |line|
           if line =~ /^[-*]\s+(.*)$/
             new_tasks << [$1.strip]
-          elsif new_tasks.any?
-            new_tasks.last << line.rstrip
+          elsif bulleted
+            new_tasks.last << line.rstrip if new_tasks.any?
           elsif line.strip != ''
             new_tasks << [line.rstrip]
           end
         end
-        new_tasks = new_tasks.map { |lines| lines.join("\n").rstrip }.reject(&:empty?)
+        new_tasks = new_tasks.map { |ls| ls.join("\n").rstrip }.reject(&:empty?)
       else
         new_tasks = [arg]
       end

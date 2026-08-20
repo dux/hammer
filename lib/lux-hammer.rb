@@ -690,8 +690,9 @@ class Hammer
       options = effective_options(cmd)
       positional, opts = Parser.new(options).parse(argv)
       opts[:args] = positional
-      # Always attach piped stdin (nil when TTY / empty). Recipes that want
-      # JSON body handling call Hammer::Input.prepare_json! in a before hook.
+      # opts[:stdin] reads piped stdin on first access (nil when TTY / empty).
+      # Recipes that want JSON body handling call Hammer::Input.prepare_json!
+      # in a before hook.
       Hammer::Input.attach_stdin!(opts)
       print_run_banner(cmd, full || cmd.name, positional, opts, options: options) unless quiet || ENV['HAMMER_QUIET']
       instance = new

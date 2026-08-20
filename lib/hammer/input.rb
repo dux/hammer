@@ -3,18 +3,23 @@
 require 'json'
 
 class Hammer
-  # Stdin + JSON helpers for opts. Hammer always attaches piped stdin as
-  # `opts[:stdin]`; recipes opt into JSON body handling via
-  # `Hammer::Input.prepare_json!` (typically from a `before` hook) and/or
-  # `opt :json, type: :json` / `global_opt :json, type: :json`.
+  # Stdin + JSON helpers for opts. Hammer exposes piped stdin as
+  # `opts[:stdin]`, read lazily on first access; recipes opt into JSON body
+  # handling via `Hammer::Input.prepare_json!` (typically from a `before`
+  # hook) and/or `opt :json, type: :json` / `global_opt :json, type: :json`.
   module Input
     module_function
 
     # Read piped stdin once. Returns nil when stdin is a TTY or empty.
-    # Does not consume an interactive TTY.
+    # Does not consume an interactive TTY, and does not block on a socket
+    # that has nothing pending: agent harnesses (Claude Code's Bash tool)
+    # hand every command a unix socket as stdin that never reaches EOF, so
+    # a plain read would hang there for good. A shell pipe or a redirected
+    # file is a FIFO or a regular file and is still read in full.
     def read_stdin
       return nil if $stdin.closed?
       return nil if $stdin.tty?
+      return nil if idle_socket?($stdin)
 
       data = $stdin.read
       return nil if data.nil?
@@ -25,11 +30,26 @@ class Hammer
       nil
     end
 
-    # Idempotent: sets opts[:stdin] if not already present.
-    def attach_stdin!(opts)
-      return opts[:stdin] if opts.key?(:stdin)
+    def idle_socket?(io)
+      return false unless io.respond_to?(:stat) && io.stat.socket?
 
-      opts[:stdin] = read_stdin
+      IO.select([io], nil, nil, 0).nil?
+    rescue StandardError
+      false
+    end
+
+    # Reads stdin into the hash on the first `opts[:stdin]` lookup and keeps
+    # the result, so a command that never asks for stdin never waits on it.
+    LAZY_STDIN = lambda do |hash, key|
+      key == :stdin ? (hash[:stdin] = Input.read_stdin) : nil
+    end
+
+    # Idempotent: leaves an explicit opts[:stdin] alone, otherwise installs
+    # the lazy reader. Nothing is read until a recipe looks at opts[:stdin].
+    def attach_stdin!(opts)
+      return if opts.key?(:stdin) || opts.default_proc.equal?(LAZY_STDIN)
+
+      opts.default_proc = LAZY_STDIN
     end
 
     # Parse a JSON source string into a Hash/Array with symbol keys.

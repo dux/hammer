@@ -506,9 +506,11 @@ end
 
 ## Stdin, JSON input, and global options
 
-Every command receives **`opts[:stdin]`** automatically when stdin is a
-pipe (non-TTY) and non-empty; otherwise it is `nil`. Interactive TTYs are
-never consumed.
+Every command can read **`opts[:stdin]`**: piped stdin (non-TTY, non-empty)
+as a string, otherwise `nil`. It is read on the first lookup and kept, so a
+command that never looks never waits on a pipe. Interactive TTYs are never
+consumed, and a socket with nothing pending (agent harnesses hand one to
+every command) reads as `nil` rather than blocking.
 
 ```ruby
 task :count do

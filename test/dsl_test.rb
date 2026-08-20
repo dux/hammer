@@ -107,12 +107,14 @@ class DslTest < Minitest::Test
       end
     end
     capture { cli.start(%w[x --env=prod --loud foo]) }
-    assert_equal [:env, :loud, :args, :stdin], seen.keys
+    assert_equal [:env, :loud, :args], seen.keys
     assert(seen.keys.all? { |k| k.is_a?(Symbol) })
     assert_equal 'prod', seen[:env]
     assert_equal true,   seen[:loud]
     assert_equal ['foo'], seen[:args]
+    # stdin is read on first lookup, not attached up front
     assert_nil seen[:stdin]
+    assert_equal [:env, :loud, :args, :stdin], seen.keys
   end
 
   def test_block_must_end_with_proc
