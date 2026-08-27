@@ -50,6 +50,17 @@ class Hammer
           next
         end
 
+        # Bundled boolean short flags: `-cf` is `-c -f`. Only when every letter
+        # is a boolean switch, so `-pVALUE` below keeps its meaning.
+        if token =~ /\A-[^-]{2,}\z/
+          bundle = token[1..-1].chars.map { |ch| @by_switch["-#{ch}"] }
+          if bundle.all? { |o| o&.boolean? }
+            bundle.each { |o| values[o.name] = true }
+            i += 1
+            next
+          end
+        end
+
         # Glued short flag with value: `-pVALUE` (non-boolean short opts only).
         if token.start_with?('-') && !token.start_with?('--') && token.length > 2
           if (opt = @by_switch[token[0, 2]]) && !opt.boolean?

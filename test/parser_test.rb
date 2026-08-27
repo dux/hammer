@@ -59,6 +59,29 @@ class ParserTest < Minitest::Test
     assert_equal true, opts[:verbose]
   end
 
+  def test_bundled_boolean_short_flags
+    c = Hammer::Option.new(:continue, type: :boolean, alias: :c)
+    f = Hammer::Option.new(:full, type: :boolean, alias: :f)
+    pos, opts = parse([c, f], %w[-cf grok])
+    assert_equal %w[grok], pos
+    assert_equal true, opts[:continue]
+    assert_equal true, opts[:full]
+  end
+
+  def test_bundle_with_unknown_letter_is_unknown_option
+    c = Hammer::Option.new(:continue, type: :boolean, alias: :c)
+    err = assert_raises(Hammer::Parser::Error) { parse([c], %w[-cx]) }
+    assert_match(/unknown option: -cx/, err.message)
+  end
+
+  def test_bundle_never_swallows_glued_value_of_non_boolean
+    c = Hammer::Option.new(:continue, type: :boolean, alias: :c)
+    p = Hammer::Option.new(:port, type: :integer, alias: :p)
+    _, opts = parse([c, p], %w[-p8080])
+    assert_equal 8080, opts[:port]
+    refute opts.key?(:continue)
+  end
+
   def test_boolean_equals_false_still_casts
     o = Hammer::Option.new(:verbose, type: :boolean)
     _, opts = parse([o], %w[--verbose=false])
