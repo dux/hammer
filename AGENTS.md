@@ -301,7 +301,10 @@ Task contracts:
   `--path NAME`, `--edit NAME`, `--run NAME [ARGS]` (use `--` to
   forward flags through). Bare invocation lists.
 * `h:init` - writes `Hammer::STARTER_HAMMERFILE` to `./Hammerfile`;
-  refuses if one exists.
+  refuses if one exists. `--script` writes `Hammer::STARTER_SCRIPT`
+  (shebang + one `hello` task) to stdout instead, or to a positional
+  TARGET with mode 0755. Both templates are single-quoted heredocs in
+  `lib/lux-hammer.rb` - the one source of truth, also rendered in help.
 * `h:json` - `puts JSON` of `root.export_spec` (tasks grouped exactly
   like the bare listing via `section_for`, root group keyed `__root`).
   `--all` keeps the `h:` tree, `--compact` minifies.

@@ -1118,6 +1118,20 @@ class Hammer
     end
   RUBY
 
+  # Minimal standalone CLI, dumped by `hammer h:init --script`. The
+  # shebang is what `shebang_script` sniffs for, so `chmod +x` is all
+  # that stands between this and a working binary.
+  STARTER_SCRIPT ||= <<~'RUBY'
+    #!/usr/bin/env hammer
+
+    desc 'My standalone CLI'
+
+    task :hello do
+      desc 'Print a greeting'
+      proc { say.green 'Hello from Hammer' }
+    end
+  RUBY
+
   # Default install dir used by install.sh and `hammer h:update`.
   SELF_UPDATE_DIR  ||= File.expand_path('~/.local/share/lux-hammer')
   SELF_UPDATE_REPO ||= 'https://github.com/dux/hammer.git'

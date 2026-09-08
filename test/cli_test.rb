@@ -143,6 +143,52 @@ class CliTest < Minitest::Test
     end
   end
 
+  def test_init_script_dumps_to_stdout_without_writing
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        out, = capture { Hammer.cli(['--system', 'h:init', '--script']) }
+        # Verbatim so `h:init --script > tool` yields a runnable file.
+        assert_equal Hammer::STARTER_SCRIPT, out
+        assert_empty Dir.children(dir)
+      end
+    end
+  end
+
+  def test_init_script_with_target_writes_executable
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        out, = capture { Hammer.cli(['--system', 'h:init', '--script', 'mytool']) }
+        assert_includes out, 'created mytool'
+        assert_equal Hammer::STARTER_SCRIPT, File.read('mytool')
+        assert File.executable?('mytool')
+      end
+    end
+  end
+
+  def test_init_script_refuses_when_target_exists
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        File.write('mytool', 'keep me')
+        _, err, status = capture_exit { Hammer.cli(['--system', 'h:init', '--script', 'mytool']) }
+        assert_equal 1, status
+        assert_includes err, 'mytool already exists'
+        assert_equal 'keep me', File.read('mytool')
+      end
+    end
+  end
+
+  def test_init_script_output_runs_as_a_shebang_cli
+    # The whole point of the template: dump it, chmod +x, and it is a CLI.
+    # Guards the shebang contract, not just the string.
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        capture { Hammer.cli(['--system', 'h:init', '--script', 'mytool']) }
+        out, = capture { Hammer.cli(['./mytool', 'hello']) }
+        assert_includes out, 'Hello from Hammer'
+      end
+    end
+  end
+
   def test_init_refuses_when_hammerfile_exists
     # `h:init` refuses to clobber an existing Hammerfile. Reach it via
     # --system so the lookup doesn't chdir into the project first.

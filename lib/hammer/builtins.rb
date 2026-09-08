@@ -108,8 +108,24 @@ class Hammer
     def register_init(klass)
       klass.class_eval do
         task :init do
-          desc 'Write a starter Hammerfile in the current directory'
-          proc { Hammer::Builtins.write_starter_hammerfile }
+          desc <<~TXT
+            Write a starter Hammerfile in the current directory.
+
+            --script prints a minimal standalone CLI (shebang + one `hello`
+            task) to stdout instead - pipe it to a file, chmod +x, run it.
+            Name a TARGET to write and chmod in one step.
+          TXT
+          example 'h:init'
+          example 'h:init --script > mytool && chmod +x mytool'
+          example 'h:init --script mytool'
+          opt :script, type: :boolean, alias: :s, desc: 'print a standalone executable CLI (TARGET writes + chmod +x)'
+          proc do |opts|
+            if opts[:script]
+              Hammer::Builtins.write_starter_script(opts[:args].first)
+            else
+              Hammer::Builtins.write_starter_hammerfile
+            end
+          end
         end
       end
     end
@@ -235,6 +251,20 @@ class Hammer
       end
       File.write(target, Hammer::STARTER_HAMMERFILE)
       Shell.say "created #{target}", :green
+    end
+
+    # `h:init --script`. No target -> stdout, so `> tool` works; with a
+    # target it lands executable. Never clobbers, same as the Hammerfile.
+    def write_starter_script(target = nil)
+      return puts(Hammer::STARTER_SCRIPT) unless target
+
+      if File.exist?(target)
+        Shell.print_error "#{target} already exists"
+        exit 1
+      end
+      File.write(target, Hammer::STARTER_SCRIPT)
+      File.chmod(0o755, target)
+      Shell.say "created #{target} (chmod +x)", :green
     end
 
     # Implementations of the `recipes` task's action flags, plus the

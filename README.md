@@ -634,6 +634,9 @@ Under the `h:` namespace:
 * `h:version` - print the lux-hammer version.
 * `h:recipes` - list / install / show / edit recipes.
 * `h:init` - write a starter Hammerfile in cwd (refuses if one exists).
+  `--script` prints a minimal standalone CLI to stdout instead (shebang
+  plus one `hello` task) - pipe it to a file and `chmod +x`, or name a
+  target to write and chmod in one step.
 * `h:json` - dump the CLI definition as JSON (tasks grouped like the
   bare listing, with desc/options/examples/aliases/needs/cron); `--all`
   includes the `h:` tasks, `--compact` minifies. Output is plain stdout
@@ -1135,7 +1138,16 @@ end
 ### `#!/usr/bin/env hammer` (single-file scripts)
 
 For a one-off CLI that lives as a single executable file, point the
-shebang straight at `hammer` - no `require`, no boilerplate:
+shebang straight at `hammer` - no `require`, no boilerplate. Start from
+the bundled template:
+
+```sh
+$ hammer h:init --script greet   # or: h:init --script > greet
+$ ./greet hello
+Hello from Hammer
+```
+
+Then fill it in - the body is plain Hammerfile DSL:
 
 ```ruby
 #!/usr/bin/env hammer
