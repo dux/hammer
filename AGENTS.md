@@ -22,8 +22,9 @@ usable as a library (`require 'lux-hammer'`, subclass `Hammer`, call
   monkey-patches.
 * **Zero runtime dependencies**. The gem must work with stdlib only. New
   dependencies require explicit user approval.
-* **Ruby >= 2.7**. Do not use language features introduced after 2.7
-  without flagging.
+* **Ruby >= 2.7** for `lib/` and `bin/`. Do not use language features
+  introduced after 2.7 there without flagging. Bundled recipes may sit
+  higher - the `llm` recipe needs >= 3.1 (endless methods, shorthand hash).
 * **`desc` is single-arg, multi-line allowed**. The argument is one
   string; it may contain newlines. The first line is the brief shown in
   command listings, the full string renders (indented) in per-command
