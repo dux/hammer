@@ -14,7 +14,7 @@ desc <<~TXT
   Commands:
     usage    subscription limits and per-model token usage
     wrap     run a command with your last two prompts pinned to the screen
-    wrap:run start claude / codex / grok / opencode in wrap, same -c -f -a switches for all
+    wrap:run start claude / codex / grok / opencode in wrap, same -c -f -b switches for all
 TXT
 
 require 'fileutils'
@@ -200,22 +200,22 @@ namespace :wrap do
         -c  continue the last session here    claude/grok/opencode -c, codex resume --last
         -f  full permissions, no prompts      --dangerously-skip-permissions, --dangerously-bypass-
                                               approvals-and-sandbox, --always-approve, --auto
-        -a  AGENTS.md from ~ down to cwd      claude --append-system-prompt, codex -c
-                                              developer_instructions, grok --rules, opencode
-                                              inline config
+        -b  bare - no AGENTS.md injection     skips the default below
 
-      codex, grok and opencode read AGENTS.md from the git root down by themselves, so
-      -a only adds the files above the repo for them; claude gets the whole chain.
+      By default every AGENTS.md from ~ down to cwd is handed to the tool: claude
+      --append-system-prompt, codex -c developer_instructions, grok --rules, opencode
+      inline config. codex, grok and opencode read AGENTS.md from the git root down by
+      themselves, so they only get the files above the repo; claude gets the whole chain.
       Anything after `--` is handed to the tool untouched. `~/bin/ai` is this command.
     D
     example 'wrap:run'
     example 'wrap:run g -cf'
-    example 'wrap:run cod -ca'
+    example 'wrap:run cod -cb'
     example 'wrap:run c -- --model opus'
 
     opt :continue, type: :boolean, desc: 'continue the last session in this folder'
     opt :full,     type: :boolean, desc: 'full permissions, no approval prompts'
-    opt :agents,   type: :boolean, desc: 'inject AGENTS.md found from ~ down to cwd'
+    opt :bare,     type: :boolean, desc: 'bare agent - do not inject AGENTS.md'
 
     proc do |opts|
       require File.join(_llm_root, 'lib/llm/wrap')
@@ -227,11 +227,11 @@ namespace :wrap do
              error("unknown tool #{prefix.inspect} - one of #{LlmLaunch::TOOLS.keys.join(', ')}")
       extra = prefix ? args.drop(1) : args
 
-      launch = LlmLaunch.build(tool, extra, continue: opts[:continue], full: opts[:full], agents: opts[:agents])
+      launch = LlmLaunch.build(tool, extra, continue: opts[:continue], full: opts[:full], bare: opts[:bare])
       ENV.update(launch.env)
       say.gray "agents: #{launch.files.map { |f| f.to_s.sub(Dir.home, '~') }.join(', ')}" if launch.files.any?
 
-      flags = %i[continue full agents].select { |k| opts[k] }.map { |k| "--#{k}" }
+      flags = %i[continue full bare].select { |k| opts[k] }.map { |k| "--#{k}" }
       origin = ['llm', 'wrap:run', tool, *flags, '--', *extra]
       # Piped stdout is block-buffered and exec drops the buffer with the banner in it.
       $stdout.flush
