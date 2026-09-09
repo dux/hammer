@@ -138,19 +138,14 @@ class Hammer
       @app_desc = text.to_s.rstrip
     end
 
-    # Program name shown in help/usage: the invocation path relative to cwd
-    # if the script lives inside it (e.g. `bin/foo` when invoked from the
-    # project root), otherwise the basename (e.g. `lux` for a globally
-    # installed bin in PATH).
+    # Program name shown in help/usage: the invocation as typed - a bare
+    # name from PATH (`lux`), or a relative path that is runnable as
+    # printed (`bin/foo`). Absolute paths (PATH symlinks, launchd units,
+    # shims) collapse to the basename - help never shows a full path.
     def default_program_name
       prog = $PROGRAM_NAME
-      return File.basename(prog) unless prog.include?('/')
-      # Resolve symlinks on both sides so e.g. macOS `/tmp` -> `/private/tmp`
-      # doesn't cause a false miss when comparing prefixes.
-      abs = File.realpath(prog) rescue File.expand_path(prog)
-      cwd = File.realpath(Dir.pwd) rescue Dir.pwd
-      return abs[(cwd.length + 1)..] if abs.start_with?("#{cwd}/")
-      File.basename(prog)
+      return File.basename(prog) if prog.start_with?('/')
+      prog.sub(%r{\A\./}, '')
     end
 
     # Define a command. Block runs in a CommandBuilder context and must

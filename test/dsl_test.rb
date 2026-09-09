@@ -738,23 +738,44 @@ class DslTest < Minitest::Test
     end
   end
 
-  def test_default_program_name_is_relative_when_bin_is_inside_cwd
+  def test_default_program_name_keeps_typed_relative_path
+    with_program_name('bin/foo') do
+      cli = Class.new(Hammer)
+      assert_equal 'bin/foo', cli.program_name
+    end
+    with_program_name('./bin/foo') do
+      cli = Class.new(Hammer)
+      assert_equal 'bin/foo', cli.program_name
+    end
+  end
+
+  def test_default_program_name_is_basename_for_absolute_path_inside_cwd
     Dir.mktmpdir do |dir|
       bin = File.join(dir, 'bin', 'foo')
       FileUtils.mkdir_p(File.dirname(bin))
       File.write(bin, '')
       Dir.chdir(dir) do
-        with_program_name('bin/foo') do
-          cli = Class.new(Hammer)
-          assert_equal 'bin/foo', cli.program_name
-        end
-        with_program_name('./bin/foo') do
-          cli = Class.new(Hammer)
-          assert_equal 'bin/foo', cli.program_name
-        end
         with_program_name(bin) do
           cli = Class.new(Hammer)
-          assert_equal 'bin/foo', cli.program_name
+          assert_equal 'foo', cli.program_name
+        end
+      end
+    end
+  end
+
+  # A PATH symlink (`~/bin/hammer` -> the dev checkout) must not resolve
+  # into a path just because the target happens to live under cwd.
+  def test_default_program_name_ignores_symlink_target
+    Dir.mktmpdir do |dir|
+      bin = File.join(dir, 'bin', 'foo')
+      FileUtils.mkdir_p(File.dirname(bin))
+      File.write(bin, '')
+      link = File.join(Dir.mktmpdir, 'foo')
+      File.symlink(bin, link)
+      Dir.chdir(dir) do
+        with_program_name(link) do
+          cli = Class.new(Hammer)
+          assert_equal 'foo', cli.program_name
         end
       end
     end

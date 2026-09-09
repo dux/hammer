@@ -1410,7 +1410,7 @@ MyCli.hammer :greet, loud: true
 git clone https://github.com/dux/hammer
 cd lux-hammer
 bundle install
-bundle exec rake test
+bin/hammer test
 ```
 
 Tests live in `test/` and use minitest. Run a single file with

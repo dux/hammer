@@ -245,12 +245,15 @@ explicit ADR-level discussion. Keys:
 
 ## Help formatting
 
-* Program name in usage lines is computed automatically (invocation path
-  relative to cwd if the bin lives inside cwd, otherwise the basename of
-  `$PROGRAM_NAME`). There is no user-facing override; the auto-detection
-  is the whole API. `Hammer.cli` warms the cache before chdir-ing into
-  the Hammerfile's directory so the resolved name stays relative to the
-  cwd the user invoked from.
+* Program name in usage lines is the invocation as typed: a bare name
+  from PATH (`lux`), or a relative path that is runnable as printed
+  (`bin/foo`). An absolute `$PROGRAM_NAME` (PATH symlink, launchd unit,
+  shim) collapses to its basename - help never shows a full path, and
+  symlinks are never resolved (that once turned a typed `hammer` into
+  `gems/lux-hammer/bin/hammer`). There is no user-facing override; the
+  auto-detection is the whole API. `Hammer.cli` warms the cache before
+  chdir-ing into the Hammerfile's directory so a relative name stays
+  relative to the cwd the user invoked from.
 * `hammer` (no args) routes to the `:default` built-in task, which
   falls through to `print_help(extended: false)` - the brief command
   listing with a top gray `lux-hammer VERSION - <homepage>` banner.
@@ -431,7 +434,8 @@ new code in this gem should show.
 
 ## Testing
 
-* Run: `bundle exec rake test`
+* Run: `bin/hammer test` (the `:test` task in this repo's Hammerfile -
+  there is no Rakefile)
 * Single file: `bundle exec ruby -Ilib -Itest test/parser_test.rb`
 * Single test by name: `... test/parser_test.rb -n test_boolean_via_short_alias`
 * Helper `CaptureIO` in `test/test_helper.rb` swaps `$stdout`/`$stderr`
