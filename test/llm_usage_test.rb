@@ -60,6 +60,76 @@ class LlmUsageTest < Minitest::Test
     assert_equal '1%', rows[1].week_pct
   end
 
+  def test_parse_claude_adds_a_row_per_scoped_weekly_limit
+    data = oauth_usage_payload.merge('limits' => scoped_limits)
+
+    rows = LlmUsage.parse_claude(data, now: NOW)
+    assert_equal %w[Claude Fable], rows.map(&:name)
+
+    fable = rows[1]
+    assert_equal '-', fable.session_pct
+    assert_equal '-', fable.session_reset
+    assert_equal '4%', fable.week_pct
+    assert_equal '4d 3h', fable.week_reset
+    assert_equal '-', fable.month_pct
+  end
+
+  # A scope that also has its own seven_day_* window is already on the table.
+  def test_parse_claude_skips_a_scoped_limit_that_has_its_own_row
+    data = {
+      'five_hour' => { 'utilization' => 33.0, 'resets_at' => (NOW + 8040).iso8601 },
+      'seven_day_opus' => { 'utilization' => 13.0, 'resets_at' => (NOW + 356_400).iso8601 },
+      'limits' => scoped_limits + [scoped_limit('Opus', 9)]
+    }
+
+    assert_equal %w[Opus Fable], LlmUsage.parse_claude(data, now: NOW).map(&:name)
+  end
+
+  # A weekly bucket has no month column to fill, so it would render as a row of
+  # dashes next to the providers that do.
+  def test_month_view_leaves_scoped_rows_out
+    data = oauth_usage_payload.merge('limits' => scoped_limits)
+
+    assert_equal %w[Claude], LlmUsage.parse_claude(data, now: NOW, period: 'month').map(&:name)
+  end
+
+  def test_parse_claude_ignores_unscoped_and_malformed_limits
+    data = oauth_usage_payload.merge(
+      'limits' => [
+        { 'kind' => 'weekly_all', 'percent' => 30 },
+        { 'kind' => 'weekly_scoped', 'percent' => 1, 'scope' => nil },
+        'nonsense'
+      ]
+    )
+
+    assert_equal %w[Claude], LlmUsage.parse_claude(data, now: NOW).map(&:name)
+  end
+
+  # The snapshot has no per-model windows, so without this the Fable row only
+  # ever showed on the API path.
+  def test_fetch_claude_usage_merges_scoped_limits_into_the_snapshot
+    with_claude_snapshot(statusline_rate_limits, age: 60) do |path|
+      api = { 'five_hour' => { 'utilization' => 99.0 }, 'limits' => scoped_limits }
+      LlmUsage.stub(:fetch_claude_oauth_usage, [api, nil]) do
+        data, = LlmUsage.fetch_claude_usage(now: NOW, path: path, cache: false)
+
+        assert_equal 23.5, data.dig('five_hour', 'utilization')   # snapshot still wins
+        assert_equal %w[Claude Fable], LlmUsage.parse_claude(data, now: NOW).map(&:name)
+      end
+    end
+  end
+
+  def test_fetch_claude_usage_keeps_the_snapshot_when_the_api_is_unreachable
+    with_claude_snapshot(statusline_rate_limits, age: 60) do |path|
+      LlmUsage.stub(:fetch_claude_oauth_usage, [nil, 'claude: usage API unreachable']) do
+        data, note = LlmUsage.fetch_claude_usage(now: NOW, path: path, cache: false)
+
+        assert_equal 23.5, data.dig('five_hour', 'utilization')
+        assert_nil note
+      end
+    end
+  end
+
   def test_parse_codex_maps_session_and_week_windows
     data = {
       'rateLimits' => {
@@ -611,6 +681,24 @@ class LlmUsageTest < Minitest::Test
       'five_hour' => { 'utilization' => 12.0, 'resets_at' => (NOW + 8040).iso8601 },
       'seven_day' => { 'utilization' => 30.0, 'resets_at' => (NOW + 356_400).iso8601 },
       'extra_usage' => { 'is_enabled' => true, 'utilization' => 18.0 }
+    }
+  end
+
+  # The per-model weekly buckets the usage API reports next to seven_day.
+  def scoped_limits
+    [
+      { 'kind' => 'session', 'percent' => 12, 'scope' => nil },
+      { 'kind' => 'weekly_all', 'percent' => 30, 'scope' => nil },
+      scoped_limit('Fable', 4)
+    ]
+  end
+
+  def scoped_limit(model, percent)
+    {
+      'kind' => 'weekly_scoped',
+      'percent' => percent,
+      'resets_at' => (NOW + 356_400).iso8601,
+      'scope' => { 'model' => { 'id' => nil, 'display_name' => model }, 'surface' => nil }
     }
   end
 

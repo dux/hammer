@@ -45,8 +45,10 @@ task :usage do
     `~/.grok/logs/unified.jsonl` for the period end; tokens still sum
     inference_done events in that log. Claude 5h/week windows come from the
     statusline snapshot at `~/.cache/llm/claude-limits.json`, falling back to
-    the OAuth usage API. `month` shows Claude extra-usage credits (API only,
-    and only when you've enabled them).
+    the OAuth usage API. Per-model weekly windows (Fable) get their own row and
+    come from that API either way - the snapshot doesn't carry them. `month`
+    shows Claude extra-usage credits (API only, and only when you've enabled
+    them).
   D
   example 'usage'
   example 'usage month'

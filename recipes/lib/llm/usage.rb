@@ -64,7 +64,7 @@ module LlmUsage
       # and caching would freeze the staleness note. Only the API call caches.
       data, note = fetch_claude_usage(period: label, cache: cache, now: now)
       notes << note unless note.nil? || note.empty?
-      rows.concat(parse_claude(data, now: now)) if data
+      rows.concat(parse_claude(data, now: now, period: label)) if data
     end
 
     if wanted.include?(:codex)
@@ -294,7 +294,7 @@ module LlmUsage
     "#{mins}m"
   end
 
-  def parse_claude(data, now: Time.now)
+  def parse_claude(data, now: Time.now, period: nil)
     return [] unless data.is_a?(Hash)
 
     five = data['five_hour']
@@ -329,13 +329,13 @@ module LlmUsage
           month_reset: '-'
         )
       end
-      return rows
+      return rows + claude_scoped_rows(data['limits'], rows, now: now, period: period)
     end
 
     week = data['seven_day']
     return [] unless five.is_a?(Hash) || week.is_a?(Hash)
 
-    [
+    rows = [
       UsageRow.new(
         name: 'Claude',
         session_pct: format_pct(session_pct),
@@ -346,6 +346,36 @@ module LlmUsage
         month_reset: month[:reset]
       )
     ]
+    rows + claude_scoped_rows(data['limits'], rows, now: now, period: period)
+  end
+
+  # Per-model weekly buckets live in `limits` as kind weekly_scoped - Fable has
+  # one, and seven_day_opus/_sonnet read null on the accounts that do. Named off
+  # the API's own display_name, so a model added later needs nothing here; a
+  # scope already carrying its own seven_day_* row is skipped rather than
+  # doubled. A weekly bucket has nothing to say in the month view, where these
+  # would be a row of dashes.
+  def claude_scoped_rows(limits, rows, now: Time.now, period: nil)
+    return [] if period_label(period) == 'month'
+
+    taken = rows.map(&:name)
+
+    Array(limits).filter_map do |limit|
+      next unless limit.is_a?(Hash) && limit['kind'] == 'weekly_scoped'
+
+      name = limit.dig('scope', 'model', 'display_name')
+      next if name.nil? || name.empty? || taken.include?(name)
+
+      UsageRow.new(
+        name: name,
+        session_pct: '-',
+        session_reset: '-',
+        week_pct: format_pct(limit['percent']),
+        week_reset: format_reset_short(limit['resets_at'], now: now),
+        month_pct: '-',
+        month_reset: '-'
+      )
+    end
   end
 
   def parse_codex(data, now: Time.now)
@@ -403,12 +433,24 @@ module LlmUsage
     return fetch_cached(:claude, cache) { fetch_claude_oauth_usage } if period == 'month'
 
     data, note = fetch_claude_snapshot(now: now, path: path)
-    return [data, note] if data
+    return [merge_scoped_limits(data, cache: cache), note] if data
 
     api_data, api_note = fetch_cached(:claude, cache) { fetch_claude_oauth_usage }
     return [api_data, api_note] if api_data
 
     [nil, [note, api_note].compact.join('; ')]
+  end
+
+  # The statusline snapshot carries no per-model windows - Claude Code's
+  # `rate_limits` input is five_hour/seven_day and nothing else - so borrow
+  # `limits` from the API payload. Cached, so this is one call per CACHE_TTL,
+  # and silent when it fails: the snapshot's own numbers are still good.
+  def merge_scoped_limits(data, cache: true)
+    api, = fetch_cached(:claude, cache) { fetch_claude_oauth_usage }
+    limits = api['limits'] if api.is_a?(Hash)
+    return data unless limits
+
+    data.merge('limits' => limits)
   end
 
   def fetch_claude_snapshot(now: Time.now, path: CLAUDE_LIMITS_PATH)
@@ -685,11 +727,12 @@ module LlmUsage
       end
     end
 
+    # A failure is cached too, or an unreachable endpoint costs its timeout on
+    # every run - and the snapshot path that now consults the API is the one
+    # that used to be instant and offline.
     data, note = yield
-    if data
-      FileUtils.mkdir_p(CACHE_DIR)
-      File.write(path, JSON.generate('fetched_at' => Time.now.iso8601, 'data' => data, 'note' => note))
-    end
+    FileUtils.mkdir_p(CACHE_DIR)
+    File.write(path, JSON.generate('fetched_at' => Time.now.iso8601, 'data' => data, 'note' => note))
     [data, note]
   end
 
