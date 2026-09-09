@@ -34,6 +34,11 @@ module LlmUsage
   GROK_LOG_PATH   ||= File.expand_path('~/.grok/logs/unified.jsonl')
   GROK_SESSION_GLOB ||= File.expand_path('~/.grok/sessions/**/signals.json')
   GROK_SUMMARY_GLOB ||= File.expand_path('~/.grok/sessions/**/summary.json')
+  GROK_AUTH_PATH  ||= File.expand_path('~/.grok/auth.json')
+  # Same endpoint grok's /usage pane hits. 1.0.13+ strips creditUsagePercent
+  # from the unified log, so the log is only a reset-time fallback.
+  GROK_BILLING_URL ||= 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
+  GROK_TOKEN_AUTH ||= 'xai-grok-cli'
   CLAUDE_SESSION_GLOB ||= File.expand_path('~/.claude/projects/**/*.jsonl')
   # Written by the statusline hook (~/.claude/statusline-command.sh) from its
   # `rate_limits` input; mtime is the observation time.
@@ -378,15 +383,15 @@ module LlmUsage
     return nil unless data.is_a?(Hash)
 
     config = data['config'] || data
-    week_pct = config['creditUsagePercent']
-    week_reset = config['billingPeriodEnd'] || config.dig('currentPeriod', 'end')
     build = Array(config['productUsage']).find { |p| p['product'] == 'GrokBuild' }
+    week_pct = (build && build['usagePercent']) || config['creditUsagePercent']
+    week_reset = config['billingPeriodEnd'] || config.dig('currentPeriod', 'end')
 
     UsageRow.new(
       name: 'Grok',
       session_pct: '-',
       session_reset: '-',
-      week_pct: format_pct(build ? build['usagePercent'] : week_pct),
+      week_pct: format_pct(week_pct),
       week_reset: format_reset_short(week_reset, now: now)
     )
   end
@@ -496,8 +501,59 @@ module LlmUsage
     [nil, note || fallback_note || 'codex: no local rate limits']
   end
 
-  def fetch_grok_usage
-    grok_log_billing_config
+  def fetch_grok_usage(now: Time.now, path: GROK_AUTH_PATH)
+    data, note = fetch_grok_oauth_usage(now: now, path: path)
+    return [data, note] if data
+
+    log_data, log_note = grok_log_billing_config
+    return [log_data, log_note] if log_data
+
+    [nil, [note, log_note].compact.join('; ')]
+  end
+
+  def fetch_grok_oauth_usage(now: Time.now, path: GROK_AUTH_PATH)
+    token = grok_oauth_token(now: now, path: path)
+    return [nil, 'grok: no usable auth token (run `grok login`)'] unless token
+
+    uri = URI(GROK_BILLING_URL)
+    response = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 3, read_timeout: 5) do |http|
+      http.get(
+        uri.request_uri,
+        'Authorization' => "Bearer #{token}",
+        'Accept' => 'application/json',
+        'X-XAI-Token-Auth' => GROK_TOKEN_AUTH
+      )
+    end
+    return [nil, "grok: billing API returned #{response.code}"] unless response.is_a?(Net::HTTPSuccess)
+
+    data = JSON.parse(response.body)
+    return [nil, 'grok: billing API returned no config'] unless data.is_a?(Hash) && data['config'].is_a?(Hash)
+
+    [data, nil]
+  rescue JSON::ParserError
+    [nil, 'grok: billing API returned malformed JSON']
+  rescue StandardError => e
+    [nil, "grok: billing API unreachable (#{e.message})"]
+  end
+
+  # grok login writes one Hash per issuer (`https://auth.x.ai::<uuid>`).
+  # An expired token is treated as absent rather than refreshed here.
+  def grok_oauth_token(now: Time.now, path: GROK_AUTH_PATH)
+    creds = read_json(path)
+    return nil unless creds.is_a?(Hash)
+
+    creds.each_value do |entry|
+      next unless entry.is_a?(Hash)
+
+      token = entry['key']
+      next if token.nil? || token.empty?
+
+      expires_at = parse_time(entry['expires_at'])
+      next if expires_at && expires_at <= now
+
+      return token
+    end
+    nil
   end
 
   def codex_app_server_rate_limits

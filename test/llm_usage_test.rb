@@ -95,6 +95,22 @@ class LlmUsageTest < Minitest::Test
     assert_equal '6d 22h', row.week_reset
   end
 
+  def test_parse_grok_falls_back_to_credit_percent_when_build_has_none
+    data = {
+      'config' => {
+        'creditUsagePercent' => 12.0,
+        'billingPeriodEnd' => (NOW + 598_800).iso8601,
+        'productUsage' => [
+          { 'product' => 'GrokBuild' },
+          { 'product' => 'GrokChat' }
+        ]
+      }
+    }
+
+    row = LlmUsage.parse_grok(data, now: NOW)
+    assert_equal '12%', row.week_pct
+  end
+
   def test_render_table_default_columns
     rows = [
       LlmUsage::UsageRow.new(
@@ -475,6 +491,67 @@ class LlmUsageTest < Minitest::Test
   def test_normalize_providers_rejects_unknown
     err = assert_raises(Hammer::Error) { LlmUsage.normalize_providers(['claude', 'openai']) }
     assert_includes err.message, 'unknown provider'
+  end
+
+  def test_grok_oauth_token_reads_auth_file
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'auth.json')
+      File.write(path, {
+        'https://auth.x.ai::abc' => {
+          'key' => 'tok',
+          'expires_at' => (NOW + 3600).iso8601
+        }
+      }.to_json)
+
+      assert_equal 'tok', LlmUsage.grok_oauth_token(now: NOW, path: path)
+    end
+  end
+
+  def test_grok_oauth_token_rejects_expired_token
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'auth.json')
+      File.write(path, {
+        'https://auth.x.ai::abc' => {
+          'key' => 'tok',
+          'expires_at' => (NOW - 1).iso8601
+        }
+      }.to_json)
+
+      assert_nil LlmUsage.grok_oauth_token(now: NOW, path: path)
+    end
+  end
+
+  def test_fetch_grok_usage_prefers_api_over_log
+    api = [{ 'config' => { 'creditUsagePercent' => 1.0 } }, nil]
+    LlmUsage.stub(:fetch_grok_oauth_usage, api) do
+      LlmUsage.stub(:grok_log_billing_config, [nil, 'grok: no billing log']) do
+        data, note = LlmUsage.fetch_grok_usage(now: NOW, path: '/missing.json')
+        assert_equal 1.0, data.dig('config', 'creditUsagePercent')
+        assert_nil note
+      end
+    end
+  end
+
+  def test_fetch_grok_usage_falls_back_to_log
+    log = [{ 'config' => { 'billingPeriodEnd' => (NOW + 3600).iso8601 } }, nil]
+    LlmUsage.stub(:fetch_grok_oauth_usage, [nil, 'grok: billing API returned 401']) do
+      LlmUsage.stub(:grok_log_billing_config, log) do
+        data, note = LlmUsage.fetch_grok_usage(now: NOW, path: '/missing.json')
+        assert data.dig('config', 'billingPeriodEnd')
+        assert_nil note
+      end
+    end
+  end
+
+  def test_fetch_grok_usage_reports_both_failures
+    LlmUsage.stub(:fetch_grok_oauth_usage, [nil, 'grok: no usable auth token (run `grok login`)']) do
+      LlmUsage.stub(:grok_log_billing_config, [nil, 'grok: no billing log (run grok once)']) do
+        data, note = LlmUsage.fetch_grok_usage(now: NOW, path: '/missing.json')
+        assert_nil data
+        assert_includes note, 'no usable auth token'
+        assert_includes note, 'no billing log'
+      end
+    end
   end
 
   private

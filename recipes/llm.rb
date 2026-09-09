@@ -40,10 +40,13 @@ task :usage do
 
     Default view lists session and weekly windows side by side.
     Local Claude, Codex, and Grok sessions provide calendar day, week, and month token totals.
-    Reads Codex via `codex app-server`; Grok billing + tokens from `~/.grok/logs/unified.jsonl`
-    (inference_done events). Claude 5h/week windows come from the statusline snapshot at
-    `~/.cache/llm/claude-limits.json`, falling back to the OAuth usage API. `month` shows
-    Claude extra-usage credits (API only, and only when you've enabled them).
+    Reads Codex via `codex app-server`. Grok week credits come from the
+    `cli-chat-proxy` billing API (`~/.grok/auth.json`), falling back to
+    `~/.grok/logs/unified.jsonl` for the period end; tokens still sum
+    inference_done events in that log. Claude 5h/week windows come from the
+    statusline snapshot at `~/.cache/llm/claude-limits.json`, falling back to
+    the OAuth usage API. `month` shows Claude extra-usage credits (API only,
+    and only when you've enabled them).
   D
   example 'usage'
   example 'usage month'
