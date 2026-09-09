@@ -6,6 +6,7 @@ desc <<~TXT
   llm - personal LLM utility CLI
 
   Namespaces:
+    browser  drive a local Chrome with Stagehand, thinking through claude / codex / ollama
     memory   persistent memory store (backs the Claude Code memory plugin)
     plan     apply a /plan bundle - sha1 checked, drift aware
     prompt   token-prefix prompt expander (UserPromptSubmit hook + CLI)
@@ -27,6 +28,7 @@ _llm_root = File.dirname(File.realpath(__FILE__))
 require File.join(_llm_root, 'lib/llm/usage')
 require File.join(_llm_root, 'lib/llm/plan')
 
+BROWSER_LIB  ||= File.join(_llm_root, 'lib/llm/browser')
 STORE        ||= ENV['CLAUDE_MEMORY_STORE'] || File.expand_path('~/dev/ai/memory')
 VALID_TYPES  ||= %w[user feedback project reference].freeze
 
@@ -382,6 +384,98 @@ namespace :memory do
   task :path do
     desc 'Print the storage path (where memory files live)'
     proc { say STORE }
+  end
+end
+
+namespace :browser do
+  # Helpers live inside the namespace block for the same reason as in
+  # :memory - namespace subclasses do not see the recipe's root class. The
+  # recipe-level `_llm_root` local is out of reach in a def, hence the constant.
+  private
+
+  def browser_lib
+    require BROWSER_LIB
+    LlmBrowser
+  end
+
+  task :setup do
+    desc <<~D
+      Install Stagehand globally with bun and report what the browser tools can use.
+
+      Stagehand (@browserbasehq/stagehand) drives the installed Google Chrome over CDP.
+      Its act / observe / extract calls need a model: claude and codex answer through
+      their CLIs on your subscription, ollama through the local daemon. No API key.
+    D
+    example 'browser:setup'
+
+    proc do
+      lib = browser_lib
+      if lib.installed?
+        say.gray 'stagehand already installed'
+      else
+        say.gray lib.setup_argv.join(' ')
+        error 'bun add failed' unless system(*lib.setup_argv)
+      end
+      lib.check.each do |name, ok|
+        say "#{name.ljust(10)} #{ok ? 'ok' : 'missing'}", (ok ? :green : :red)
+      end
+    end
+  end
+
+  task :run do
+    desc <<~D
+      Open URL in a local Chrome and run act / observe / extract instructions in order.
+
+      Instructions are quoted strings prefixed with act:, observe: or extract:; a bare
+      string is an extract. One JSON object per instruction goes to stdout, progress to
+      stderr. Use it for other people's sites - multi-step flows, structured extraction,
+      forms and logins (--headed). For an app you develop use the chrome-devtools MCP:
+      console, network and perf live there. Nothing here sees inside a canvas.
+
+      Each model call spawns the CLI, so expect 10-20 s per instruction. Nothing is
+      cached locally. BROWSE_CLAUDE_MODEL (sonnet - haiku misses clicks), BROWSE_CODEX_MODEL
+      (codex default - set a small one) and BROWSE_OLLAMA_MODEL (qwen2.5-coder) pick the model.
+    D
+    example 'browser:run https://example.com "extract: the heading and the first link href"'
+    example 'browser:run https://x.com "act: click Sign in" "extract: the form field labels" --headed'
+    example 'browser:run https://x.com "observe: what can be clicked" --llm codex'
+
+    opt :llm,    default: 'claude', positional: false, desc: 'claude | codex | ollama (prefix ok)'
+    opt :headed, type: :boolean, desc: 'visible Chrome window - logins, watching it work'
+    opt :shot,   positional: false, desc: 'save a PNG of the final page to this path'
+
+    proc do |opts|
+      lib = browser_lib
+      url, *instructions = Array(opts[:args])
+      error 'usage: llm browser:run <url> ["act: ..."] ["extract: ..."] [--llm claude|codex|ollama] [--headed] [--shot out.png]' unless url
+      error 'run `llm browser:setup` first' unless lib.installed?
+      llm = lib.llm(opts[:llm]) || error("unknown llm #{opts[:llm].inspect} - one of #{lib::LLMS.join(', ')}")
+
+      $stdout.flush
+      exit(system(lib.env, *lib.run_argv(url, instructions, llm: llm, headed: opts[:headed], shot: opts[:shot])) ? 0 : 1)
+    end
+  end
+
+  task :script do
+    desc <<~D
+      Run an ad-hoc Stagehand script with Bun, Stagehand resolvable from the global store.
+
+      The script imports open() from recipes/lib/llm/browser/lib.ts and gets a ready
+      { stagehand, page, close }. Anything after the file is left in process.argv.
+    D
+    example 'browser:script ./scrape.ts'
+    example 'browser:script ./scrape.ts -- --since 2026-01-01'
+
+    proc do |opts|
+      lib = browser_lib
+      path, *extra = Array(opts[:args])
+      error 'usage: llm browser:script <file.ts> [args...]' unless path
+      error "no such file: #{path}" unless File.file?(File.expand_path(path))
+      error 'run `llm browser:setup` first' unless lib.installed?
+
+      $stdout.flush
+      exec(lib.env, *lib.script_argv(path, extra))
+    end
   end
 end
 
