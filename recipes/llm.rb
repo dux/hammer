@@ -742,9 +742,10 @@ namespace :prompt do
     D
     opt :claude, type: :boolean, default: false, desc: 'Claude Code hook mode'
     opt :codex,  type: :boolean, default: false, desc: 'Codex hook mode'
+    opt :grok,   type: :boolean, default: false, desc: 'Grok CLI hook mode'
 
     proc do |opts|
-      error '--claude or --codex required' unless opts[:claude] || opts[:codex]
+      error '--claude, --codex or --grok required' unless opts[:claude] || opts[:codex] || opts[:grok]
 
       raw = opts[:stdin].to_s
       prompt = begin
