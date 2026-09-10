@@ -20,6 +20,15 @@ class LlmLaunchTest < Minitest::Test
     assert_equal %w[opencode -c --auto], LlmLaunch.build('opencode', continue: true, full: true, bare: true).argv
   end
 
+  # A tool added to the registry without these is invisible to `--update`.
+  def test_every_tool_declares_update_and_version_argv
+    LlmLaunch::TOOLS.each do |name, spec|
+      assert_equal name, spec[:update].first, "#{name} update argv"
+      assert_equal name, spec[:version].first, "#{name} version argv"
+      assert_equal name, spec[:models].first, "#{name} models argv" if spec[:models]
+    end
+  end
+
   def test_extra_args_pass_through_last
     launch = LlmLaunch.build('claude', %w[--model opus], continue: true, bare: true)
     assert_equal %w[claude -c --model opus], launch.argv

@@ -9,17 +9,24 @@ require 'pathname'
 module LlmLaunch
   Launch = Struct.new(:argv, :env, :files)
 
+  # The one registry of agent CLIs. :continue / :full / :agents drive a launch;
+  # :update / :version / :models drive `llm wrap:run --update` (LlmUpdate).
   # :agents gets the combined AGENTS.md text and the file paths, and answers
   # with the argv to add and/or env to set - opencode has no flag for
   # instructions, only inline config, and that one takes paths.
+  # :models is nil where the CLI has no listing command - skip, not "none".
   TOOLS ||= {
     'claude'   => { continue: %w[-c],            full: %w[--dangerously-skip-permissions],
+                    update: %w[claude update],   version: %w[claude --version],   models: nil,
                     agents: ->(text, _files) { { args: ['--append-system-prompt', text] } } },
     'codex'    => { continue: %w[resume --last], full: %w[--dangerously-bypass-approvals-and-sandbox],
+                    update: %w[codex update],    version: %w[codex --version],    models: nil,
                     agents: ->(text, _files) { { args: ['-c', "developer_instructions=#{text}"] } } },
     'grok'     => { continue: %w[-c],            full: %w[--always-approve],
+                    update: %w[grok update],     version: %w[grok version],       models: %w[grok models],
                     agents: ->(text, _files) { { args: ['--rules', text] } } },
     'opencode' => { continue: %w[-c],            full: %w[--auto],
+                    update: %w[opencode upgrade], version: %w[opencode --version], models: %w[opencode models],
                     agents: ->(_text, files) { { env: { 'OPENCODE_CONFIG_CONTENT' => { instructions: files }.to_json } } } },
   }.freeze
 

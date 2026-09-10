@@ -207,6 +207,11 @@ namespace :wrap do
                                               approvals-and-sandbox, --always-approve, --auto
         -b  bare - no AGENTS.md injection     skips the default below
 
+      --update runs each CLI's own updater (claude/codex/grok update, opencode upgrade),
+      reports old -> new, then re-reads the model lists and shows what appeared or
+      disappeared since the last run. A TOOL prefix scopes it to that one tool; no prefix
+      updates all four.
+
       By default every AGENTS.md from ~ down to cwd is handed to the tool: claude
       --append-system-prompt, codex -c developer_instructions, grok --rules, opencode
       inline config. codex, grok and opencode read AGENTS.md from the git root down by
@@ -217,10 +222,12 @@ namespace :wrap do
     example 'wrap:run g -cf'
     example 'wrap:run cod -cb'
     example 'wrap:run c -- --model opus'
+    example 'wrap:run --update'
 
     opt :continue, type: :boolean, desc: 'continue the last session in this folder'
     opt :full,     type: :boolean, desc: 'full permissions, no approval prompts'
     opt :bare,     type: :boolean, desc: 'bare agent - do not inject AGENTS.md'
+    opt :update,   type: :boolean, desc: 'update the agent CLIs, then show model changes'
 
     proc do |opts|
       require File.join(_llm_root, 'lib/llm/wrap')
@@ -231,6 +238,11 @@ namespace :wrap do
       tool = LlmLaunch.tool(prefix) ||
              error("unknown tool #{prefix.inspect} - one of #{LlmLaunch::TOOLS.keys.join(', ')}")
       extra = prefix ? args.drop(1) : args
+
+      if opts[:update]
+        require File.join(_llm_root, 'lib/llm/update')
+        exit LlmUpdate.run(prefix ? [tool] : LlmLaunch::TOOLS.keys)
+      end
 
       launch = LlmLaunch.build(tool, extra, continue: opts[:continue], full: opts[:full], bare: opts[:bare])
       ENV.update(launch.env)
