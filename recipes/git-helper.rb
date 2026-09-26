@@ -450,6 +450,26 @@ task :pr do
   proc { open_in_browser(remote_pr_url) }
 end
 
+task :prs do
+  desc 'list open PRs: id, author, short title, url (others first, then mine)'
+  proc do |_|
+    require 'json'
+    out = `GH_PAGER=cat gh pr list --state open --limit 100 --json number,title,url,author`
+    error 'gh pr list failed' unless $?.success?
+    prs = JSON.parse(out)
+    next say('No open PRs', :yellow) if prs.empty?
+    me = `GH_PAGER=cat gh api user --jq .login`.chomp
+    mine, others = prs.partition { |pr| pr.dig('author', 'login') == me }
+    author_width = prs.map { |pr| pr.dig('author', 'login').to_s.length }.max
+    (others + mine).each do |pr|
+      title  = pr['title'].length > 50 ? "#{pr['title'][0, 49]}…" : pr['title']
+      author = pr.dig('author', 'login').to_s.ljust(author_width)
+      author = author.color(mine.include?(pr) ? :green : :blue)
+      puts "#{"##{pr['number']}".ljust(7).color(:yellow)} #{author}  #{title.ljust(50)}  #{pr['url']}"
+    end
+  end
+end
+
 # ---- tags / users / stats --------------------------------------------
 
 task :tag do
