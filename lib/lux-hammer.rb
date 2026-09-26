@@ -1281,10 +1281,12 @@ class Hammer
   # built-ins (so the script's `--help` shows only what it defines).
   # `program_name` is the script's basename so help reads "myscript foo"
   # rather than "hammer foo" - works even when invoked via a symlink in
-  # PATH, since argv[0] is the path the user typed.
+  # PATH, since argv[0] is the path the user typed. `.rb` is stripped so
+  # a recipe exec'd as `recipes/llm.rb` (typical `~/bin/llm` stub) still
+  # banners as `llm`, matching `Hammer.recipe(:llm)`.
   def self.run_shebang(path, argv)
     klass = Class.new(Hammer)
-    klass.instance_variable_set(:@program_name, File.basename(path))
+    klass.instance_variable_set(:@program_name, File.basename(path, '.rb'))
     Builder.new(klass).evaluate(File.read(path), path)
     klass.start(argv)
   end

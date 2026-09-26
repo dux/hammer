@@ -39,6 +39,25 @@ class ShebangTest < Minitest::Test
     end
   end
 
+  def test_program_name_strips_rb_extension
+    # ~/bin/llm execs recipes/llm.rb; the shebang path is the .rb file,
+    # but the CLI the user typed is `llm`.
+    Dir.mktmpdir do |dir|
+      script = write_script(dir, 'llm.rb', <<~'RUBY')
+        task :usage do
+          desc 'show usage'
+          proc { |_| say 'ok' }
+        end
+      RUBY
+      out, err = capture { Hammer.cli([script, 'usage']) }
+      refute_includes err, 'llm.rb'
+      assert_includes err, '> llm usage'
+      help, = capture { Hammer.cli([script, '--help']) }
+      assert_includes help, 'Usage: llm'
+      refute_includes help, 'Usage: llm.rb'
+    end
+  end
+
   def test_cwd_is_preserved
     Dir.mktmpdir do |script_dir|
       Dir.mktmpdir do |run_dir|
