@@ -673,10 +673,12 @@ module LlmWrap
   #   * a sequence, leaving the introducer stranded and its tail printed as
   #     text - the literal "[22m" on screen
   #   * a UTF-8 character, which comes out as a replacement glyph
-  #   * a DECSC the child opened and has not closed yet. The terminal has one
-  #     save slot; we take it, and the child's own ESC8 then puts its cursor on
-  #     our bar and it draws the rest of the frame over the top. Claude Code
-  #     wraps every repaint in ESC7 ... ESC8, so this one is not theoretical.
+  #   * a cursor save the child opened and has not restored yet, in either the
+  #     DECSC (ESC7/ESC8) or SCO (CSI s / CSI u) form. The terminal has one save
+  #     slot; we take it, and the child's own restore then puts its cursor on our
+  #     bar and it draws the rest of the frame over the top. Claude Code brackets
+  #     every repaint in ESC7 ... ESC8 and OpenCode uses CSI s ... CSI u, so this
+  #     one is not theoretical.
   #
   # This is only ever asked about the *end* of what we have written so far, so
   # there is no need to understand the sequences - just to know where they stop.
@@ -774,11 +776,20 @@ module LlmWrap
     end
 
     def csi(byte)
+      first = @len.zero?
       @len += 1
       return @state = :esc if byte == ESC       # aborted, a new one starting
       return @state = :text if @len > MAX_CSI
 
-      @state = :text if byte >= 0x40 && byte <= 0x7e
+      if byte >= 0x40 && byte <= 0x7e
+        # SCO save/restore (CSI s / CSI u) share the single save slot with
+        # DECSC/DECRC on the emulators we run against, and OpenCode repaints
+        # through this pair - a paint between them takes the slot and its
+        # restore lands the rest of the frame on our bar.
+        @saved += 1 if first && byte == 0x73
+        @saved -= 1 if first && byte == 0x75 && @saved.positive?
+        @state = :text
+      end
     end
 
     # String payloads run to BEL or ST (ESC \).

@@ -657,6 +657,19 @@ class WrapOutScanTest < Minitest::Test
     assert_safe "\e8\e8\e7\e8"
   end
 
+  # OpenCode saves and restores the cursor with the SCO pair (CSI s / CSI u)
+  # rather than DECSC. On the emulators here both forms reach the same single
+  # save slot, so a paint between them takes it and the restore lands the rest
+  # of the frame on our bar - the scraped-pane scramble seen under Herdr.
+  def test_a_sco_save_is_not_a_boundary
+    refute_safe "\e[s"
+    refute_safe "\e[s", "\e[10;1H", 'row moved '
+    assert_safe "\e[s", "\e[10;1H", 'row moved ', "\e[u"
+    assert_safe "\e[u"                 # unmatched restore, no negative count
+    assert_safe "\e[u\e[u\e[s\e[u"
+    assert_safe "\e[2s"                # only the bare CSI s is a save
+  end
+
   def test_reset_forgives_a_stream_we_have_lost
     s = scan("\e]0;never terminated")
     refute_predicate s, :safe?
