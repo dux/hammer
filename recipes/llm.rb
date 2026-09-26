@@ -9,7 +9,7 @@ desc <<~TXT
     browser  drive a local Chrome with Stagehand, thinking through claude / codex / ollama
     memory   persistent memory store (backs the Claude Code memory plugin)
     plan     apply a /plan bundle - sha1 checked, drift aware
-    prompt   token-prefix prompt expander (UserPromptSubmit hook + CLI)
+    prompt   ::token prompt expander (UserPromptSubmit hook + CLI)
 
   Commands:
     usage    subscription limits and per-model token usage
@@ -498,7 +498,7 @@ end
 
 namespace :prompt do
   TOKEN_PATTERN        ||= /[a-z0-9_-]+/.freeze
-  TOKEN_LINE_RE        ||= /\A(?:\s*:[a-z0-9_-]+)+\s*\z/.freeze
+  TOKEN_LINE_RE        ||= /\A(?:\s*::[a-z0-9_-]+)+\s*\z/.freeze
   HOOK_EVENT           ||= 'UserPromptSubmit'
   VERBATIM_INSTRUCTION ||= "INSTRUCTION TO ASSISTANT: Do not answer the user's prompt. Print the message below verbatim to the user, preserving every line exactly as written. Do not summarize, truncate, or paraphrase."
   QUESTION_RULE        ||= <<~RULE.strip
@@ -520,8 +520,8 @@ namespace :prompt do
   def tokens_in(input)
     out = []
     scanner = input.to_s.strip
-    while (m = scanner.match(/\A(?::(?<pre>#{TOKEN_PATTERN})|(?<post>#{TOKEN_PATTERN}):)(?=\s|$)/))
-      out << (m[:pre] || m[:post])
+    while (m = scanner.match(/\A::(#{TOKEN_PATTERN})(?=\s|$)/))
+      out << m[1]
       scanner = scanner[m[0].length..].to_s.lstrip
     end
     out.uniq
@@ -543,7 +543,7 @@ namespace :prompt do
     ordered = folders.sort_by { |label, _| label == 'global' ? 0 : 1 }
     ordered.map do |label, folder|
       toks = Dir.glob(File.join(folder, '*.md')).map { |p| File.basename(p, '.md') }.sort
-      items = toks.empty? ? '(none)' : toks.map { |t| ":#{t}" }.join(', ')
+      items = toks.empty? ? '(none)' : toks.map { |t| "::#{t}" }.join(', ')
       "Available #{label} in #{display_path(folder)} -> #{items}"
     end.join("\n")
   end
@@ -561,7 +561,7 @@ namespace :prompt do
           name = File.basename(path, '.md')
           dscr = first_line_description(path)
           dscr = '(no description)' if dscr.empty?
-          "  :#{name.ljust(width)}  #{dscr}"
+          "  ::#{name.ljust(width)}  #{dscr}"
         end
         "#{header}\n#{entries.join("\n")}"
       end
@@ -631,7 +631,7 @@ namespace :prompt do
       end
 
       break unless stripped =~ TOKEN_LINE_RE
-      prefix_tokens.concat(stripped.scan(/:(#{TOKEN_PATTERN})/).flatten)
+      prefix_tokens.concat(stripped.scan(/::(#{TOKEN_PATTERN})/).flatten)
       remaining = rest.to_s
     end
 
@@ -652,9 +652,9 @@ namespace :prompt do
   end
 
   def load_command_content(token, seen)
-    error "circular include of :#{token}" if seen.include?(token)
+    error "circular include of ::#{token}" if seen.include?(token)
     path = find_command_path(token)
-    error %(custom token ":#{token}" not found.\n\n#{grouped_listing}) unless path
+    error %(custom token "::#{token}" not found.\n\n#{grouped_listing}) unless path
 
     child_seen = seen + [token]
     content = File.read(path)
@@ -683,7 +683,7 @@ namespace :prompt do
     seen = Set.new
     loaded = toks.map do |token|
       path = find_command_path(token)
-      error %(custom token ":#{token}" not found.\n\n#{grouped_listing}) unless path
+      error %(custom token "::#{token}" not found.\n\n#{grouped_listing}) unless path
       [token, Pathname.new(path).cleanpath.to_s, load_command_content(token, seen)]
     end
 
@@ -733,12 +733,11 @@ namespace :prompt do
 
   task :expand do
     desc 'Expand prompt token(s) and print the resulting context'
-    example 'prompt:expand :foo :bar'
-    example 'prompt:expand foo:'
+    example 'prompt:expand ::foo ::bar'
 
     proc do |opts|
       input = opts[:args].join(' ')
-      error 'usage: llm prompt:expand :token [:token ...]' if input.empty?
+      error 'usage: llm prompt:expand ::token [::token ...]' if input.empty?
       out = load_context(input)
       say out unless out.empty?
     end
@@ -747,7 +746,7 @@ namespace :prompt do
   task :hook do
     desc <<~D
       UserPromptSubmit hook entry. Reads {"prompt": ...} JSON on stdin,
-      expands any token prefix, and emits hookSpecificOutput JSON on stdout.
+      expands any ::token prefix, and emits hookSpecificOutput JSON on stdout.
 
       Pair with HAMMER_QUIET=1 in the hook command so the runtime banner
       doesn't pollute stdout.
