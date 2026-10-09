@@ -13,17 +13,16 @@ end
 task :gem do
   desc <<~TXT
     Gem helpers. Bare invocation prints the current version. Flags
-    pick the action; --publish bumps + builds + pushes in one shot.
+    pick the action; --publish writes the version, builds and pushes in one shot.
   TXT
   opt :build,   type: :boolean,              desc: 'build the gem (cleans old .gem artifacts first)'
-  opt :inc,     type: :boolean,              desc: 'bump .version (see --bump for level)'
+  opt :inc,     type: :boolean,              desc: 'write the git-count version to .version'
   opt :publish, type: :boolean,              desc: 'inc + build + push to RubyGems'
-  opt :bump,    default: 'patch',            desc: 'bump level for --inc / --publish: major | minor | patch'
   opt :yes,     type: :boolean, default: false, desc: 'skip publish confirmation prompt'
 
   proc do |opts|
     if opts[:publish]
-      hammer :gem, inc: true, bump: opts[:bump]
+      hammer :gem, inc: true
       hammer :gem, build: true
 
       gem_file = Dir.glob('lux-hammer-*.gem').sort.last
@@ -37,19 +36,9 @@ task :gem do
       end
       sh 'gem build lux-hammer.gemspec'
     elsif opts[:inc]
-      file  = '.version'
-      old   = File.read(file).strip
-      parts = old.split('.').map(&:to_i)
-      error "bad version in #{file}: #{old.inspect}" unless parts.size == 3
-
-      case opts[:bump]
-      when 'major' then parts = [parts[0] + 1, 0, 0]
-      when 'minor' then parts = [parts[0], parts[1] + 1, 0]
-      when 'patch' then parts[2] += 1
-      else error "unknown bump: #{opts[:bump]} (major | minor | patch)"
-      end
-
-      newv = parts.join('.')
+      file = '.version'
+      old  = File.read(file).strip
+      newv = Hammer::Version.string
       File.write('.version.prev', "#{old}\n")
       File.write(file, "#{newv}\n")
       say "#{old} -> #{newv}", :green

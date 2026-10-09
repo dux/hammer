@@ -1,4 +1,5 @@
 require_relative 'hammer/shell'
+require_relative 'hammer/version'
 require_relative 'hammer/input'
 require_relative 'hammer/option'
 require_relative 'hammer/parser'
@@ -47,8 +48,9 @@ class Hammer
   Error          ||= Class.new(StandardError)
   AmbiguousMatch ||= Class.new(Error)
 
-  # Gem version, read once from the bundled .version file.
-  VERSION ||= File.read(File.expand_path('../.version', __dir__)).strip
+  # Gem version: the formatted main-branch commit count in a checkout, or the
+  # bundled .version baked into a released gem. See Hammer::Version.
+  VERSION ||= Version.string
 
   # Convenience aliases so recipes can write `Hammer.prepare_json!(opts)`
   # without the Input module path. See Hammer::Input.

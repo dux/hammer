@@ -15,8 +15,9 @@ usable as a library (`require 'lux-hammer'`, subclass `Hammer`, call
 
 * **One root constant**: `Hammer`. Never pollute `Object` or introduce
   another top-level constant. Sub-types live as `Hammer::Shell`,
-  `Hammer::Option`, `Hammer::Parser`, `Hammer::Command`,
-  `Hammer::Loader`, `Hammer::Builder`, `Hammer::CommandBuilder`. The one
+  `Hammer::Version`, `Hammer::Option`, `Hammer::Parser`,
+  `Hammer::Command`, `Hammer::Loader`, `Hammer::Builder`,
+  `Hammer::CommandBuilder`. The one
   exception is `String#color(:name)` (defined in `lib/hammer/shell.rb`)
   - a tiny convenience for `"hi".color(:cyan)`. Do not add more
   monkey-patches.
@@ -39,6 +40,7 @@ usable as a library (`require 'lux-hammer'`, subclass `Hammer`, call
 bin/hammer                  # CLI entry point
 lib/lux-hammer.rb           # Entry - defines class Hammer and its DSL
 lib/hammer/shell.rb         # ANSI/IO helpers
+lib/hammer/version.rb       # Hammer::Version - git-count version + .version fallback
 lib/hammer/option.rb        # One option definition (types: string/boolean/integer/float/array/json)
 lib/hammer/input.rb         # opts[:stdin], prepare_json!, JSON @file / pipe helpers
 lib/hammer/parser.rb        # ARGV -> [positional, opts_hash]
@@ -58,6 +60,7 @@ test/parser_test.rb         # ARGV parsing edge cases
 test/option_test.rb         # Option declaration / casting
 test/command_test.rb        # Command data type
 test/shell_test.rb          # ANSI / IO helpers
+test/version_test.rb        # version formatting (git count -> dotted)
 test/cli_test.rb            # `hammer` binary end-to-end
 test/cron_test.rb           # schedule parser (matches?/due?/next_run)
 test/cron_server_test.rb    # job discovery, state, rotation, web UI
@@ -421,6 +424,22 @@ new code in this gem should show.
   at that command).
 * Inside a handler, just call `error 'msg'` - it resolves via the
   `Shell` mixin.
+
+## Versioning
+
+* `Hammer::VERSION` is the dboss-style formatted commit count on `main`
+  (falling back to `master`, then `HEAD`): `v82` -> `0.8.2`, `v1123` ->
+  `11.2.3`, left-padded so `v5` -> `0.0.5`. It is bare (no leading `v`)
+  so it stays a valid `Gem::Version`.
+* `Hammer::Version.string` is that value, `Hammer::Version.raw` is the
+  `v<count>` behind it, and `Hammer::Version.format` is the pure
+  formatter (a non-`v<digits>` string is returned unchanged).
+* A released gem has no `.git` and falls back to the committed
+  `.version` file. `hammer gem --inc` writes the git-count value into
+  `.version` (overwriting `.version.prev`), so the built gem's version
+  matches the checkout; the release workflow tags `v$(cat .version)`.
+* Don't reintroduce manual major/minor/patch bumps - the count is the
+  version.
 
 ## Coding rules
 
