@@ -199,7 +199,8 @@ class LlmUsageTest < Minitest::Test
     assert_includes table, 'week utilization'
     assert_includes table, 'week reset'
     assert_includes table, 'Codex'
-    assert_includes table, '82%'
+    assert_includes table, '[########--]  82%'
+    assert_includes table, '[####------]  36%'
   end
 
   def test_render_table_month_uses_full_utilization_header
@@ -213,6 +214,24 @@ class LlmUsageTest < Minitest::Test
 
     table = LlmUsage.render_table(rows, period: 'month')
     assert_includes table, 'month utilization'
+    assert_includes table, '[#---------]  12%'
+    assert_equal '12%', LlmUsage.rows_to_json(rows, period: 'month')[:rows][0][:month_util]
+  end
+
+  def test_utilization_bars_handle_missing_and_boundary_values
+    assert_equal '-', LlmUsage.utilization_bar(nil)
+    assert_equal '-', LlmUsage.utilization_bar('-')
+    assert_equal '[----------]   0%', LlmUsage.utilization_bar('0%')
+    assert_equal '[##########] 100%', LlmUsage.utilization_bar('100%')
+    assert_equal '[----------]  -5%', LlmUsage.utilization_bar('-5%')
+    assert_equal '[##########] 125%', LlmUsage.utilization_bar('125%')
+  end
+
+  def test_render_table_keeps_missing_utilization_as_dash
+    row = LlmUsage::UsageRow.new(name: 'Grok', session_pct: '-', session_reset: '-', week_pct: '12%', week_reset: '6d 22h')
+
+    line = LlmUsage.render_table([row]).lines.last
+    assert_match(/\AGrok\s+-\s+-\s+\[#---------\]  12%\s+6d 22h/, line)
   end
 
   def test_codex_tokens_are_grouped_by_model_and_calendar_period

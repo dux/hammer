@@ -770,10 +770,17 @@ module LlmUsage
 
   def row_cells(row, period)
     if period_label(period) == 'month'
-      [row.name, row.month_pct || '-', row.month_reset || '-']
+      [row.name, utilization_bar(row.month_pct), row.month_reset || '-']
     else
-      [row.name, row.session_pct, row.session_reset, row.week_pct, row.week_reset]
+      [row.name, utilization_bar(row.session_pct), row.session_reset, utilization_bar(row.week_pct), row.week_reset]
     end
+  end
+
+  def utilization_bar(value)
+    return '-' if value.nil? || value == '-'
+
+    filled = (value.to_f.clamp(0, 100) / 10).round
+    "[#{'#' * filled}#{'-' * (10 - filled)}] #{value.rjust(4)}"
   end
 
   def row_to_hash(row, period: nil)
