@@ -16,7 +16,7 @@ task :gem do
     pick the action; --publish writes the version, builds and pushes in one shot.
   TXT
   opt :build,   type: :boolean,              desc: 'build the gem (cleans old .gem artifacts first)'
-  opt :inc,     type: :boolean,              desc: 'write the git-count version to .version'
+  opt :inc,     type: :boolean,              desc: 'write the commit-count version to .version (vstamp count)'
   opt :publish, type: :boolean,              desc: 'inc + build + push to RubyGems'
   opt :yes,     type: :boolean, default: false, desc: 'skip publish confirmation prompt'
 
@@ -36,14 +36,9 @@ task :gem do
       end
       sh 'gem build lux-hammer.gemspec'
     elsif opts[:inc]
-      file = '.version'
-      old  = File.read(file).strip
-      newv = Hammer::Version.string
-      File.write('.version.prev', "#{old}\n")
-      File.write(file, "#{newv}\n")
-      say "#{old} -> #{newv}", :green
+      sh 'vstamp count'
     else
-      say File.read('.version').strip
+      say Hammer::Version.read('.version')
     end
   end
 end

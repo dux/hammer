@@ -27,7 +27,7 @@ else
 fi
 
 cd "$DIR"
-version=$(cat .version)
+version=$(sed -n 's/^version: *\([^ #]*\).*/\1/p' .version)
 gem build lux-hammer.gemspec >/dev/null
 gem install --quiet "lux-hammer-${version}.gem"
 rm -f "lux-hammer-${version}.gem"

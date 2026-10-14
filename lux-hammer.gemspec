@@ -1,4 +1,6 @@
-version = File.read File.expand_path '.version', File.dirname(__FILE__)
+require_relative 'lib/hammer/version'
+
+version = Hammer::Version.string
 
 Gem::Specification.new 'lux-hammer', version do |s|
   s.summary     = 'Thor-inspired tiny CLI builder'

@@ -73,16 +73,11 @@ helpers do
     run "open '#{url}'"
   end
 
+  # vstamp also syncs package.json, so stage it with .version
   def bump_version
     return unless BRANCH == 'master' && File.exist?('./.version')
-    old = File.read('./.version').gsub(/\s/, '')
-    parts = old.split('.')
-    parts.push(parts.pop.to_i + 1)
-    new = parts.join('.')
-    say "Version: #{old} -> #{new.color(:yellow)}"
-    File.write('./.version', new)
-    run 'git add .version'
-    new
+    files = ['.version', ('package.json' if File.exist?('package.json'))].compact
+    run "vstamp count --next && git add #{files.join(' ')}"
   end
 
   def run(command, returnable = false)
@@ -476,8 +471,8 @@ task :tag do
   desc 'tag the repo using ./.version'
   proc do |_|
     error 'no ./.version file' unless File.exist?('.version')
-    version = File.read('.version').strip
-    error 'empty ./.version' if version.empty?
+    version = Hammer::Version.read('.version')
+    error 'no version in ./.version' unless version
     run %[git tag -a #{version} -m "$(git show -s --format=%s)"]
   end
 end

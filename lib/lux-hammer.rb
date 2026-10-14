@@ -48,8 +48,7 @@ class Hammer
   Error          ||= Class.new(StandardError)
   AmbiguousMatch ||= Class.new(Error)
 
-  # Gem version: the formatted main-branch commit count in a checkout, or the
-  # bundled .version baked into a released gem. See Hammer::Version.
+  # Gem version from .version, written by vstamp. See Hammer::Version.
   VERSION ||= Version.string
 
   # Convenience aliases so recipes can write `Hammer.prepare_json!(opts)`
@@ -1150,7 +1149,7 @@ class Hammer
     Dir.chdir(dir) do
       run_or_exit('git', 'fetch', '--quiet', 'origin', 'main')
       run_or_exit('git', 'reset', '--quiet', '--hard', 'origin/main')
-      version = File.read('.version').strip
+      version = Version.read('.version')
       gem_file = "lux-hammer-#{version}.gem"
       run_or_exit('gem', 'build', 'lux-hammer.gemspec', out: File::NULL)
       run_or_exit('gem', 'install', '--quiet', gem_file)

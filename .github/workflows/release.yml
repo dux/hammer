@@ -24,16 +24,15 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Install vstamp
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/dux/vstamp/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Bump, build, push to RubyGems
         env:
           GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
         run: bin/hammer gem --publish --yes
 
       - name: Amend commit with version bump, tag, push
-        run: |
-          version=$(cat .version)
-          git add .version
-          git commit --amend --no-edit
-          git tag "v${version}"
-          git push --force-with-lease origin main
-          git push origin "v${version}"
+        run: vstamp count --release
