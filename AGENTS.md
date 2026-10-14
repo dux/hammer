@@ -434,9 +434,9 @@ new code in this gem should show.
   the gem's own `.version`, or `dev`. `Hammer::Version.read(path)` also
   accepts a plain `X.Y.Z` file, so recipes (`git-helper`) work in repos
   not migrated yet.
-* `hammer gem --inc` runs `vstamp count`; the release workflow runs
-  `hammer gem --publish` and then `vstamp count --release` (amend, tag
-  `vX.Y.Z`, push with lease).
+* Only `hammer deploy` stamps it, locally (no CI, no git hooks): tests,
+  `vstamp count --release` (amend while HEAD is unpushed, else a release
+  commit; tag `vX.Y.Z`; fast-forward push), then `gem build` + `gem push`.
 * Don't reintroduce manual major/minor/patch bumps - the count is the
   version.
 

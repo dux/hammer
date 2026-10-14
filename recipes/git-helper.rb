@@ -73,13 +73,6 @@ helpers do
     run "open '#{url}'"
   end
 
-  # vstamp also syncs package.json, so stage it with .version
-  def bump_version
-    return unless BRANCH == 'master' && File.exist?('./.version')
-    files = ['.version', ('package.json' if File.exist?('package.json'))].compact
-    run "vstamp count --next && git add #{files.join(' ')}"
-  end
-
   def run(command, returnable = false)
     say '' if @ran_once
     @ran_once = true
@@ -141,7 +134,6 @@ helpers do
         say 'Please add better commit message, min length 1 chars', :red
         next
       else
-        bump_version
         system('git', 'commit', '-m', message)
         break
       end

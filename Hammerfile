@@ -11,35 +11,30 @@ task :test do
 end
 
 task :gem do
-  desc <<~TXT
-    Gem helpers. Bare invocation prints the current version. Flags
-    pick the action; --publish writes the version, builds and pushes in one shot.
-  TXT
-  opt :build,   type: :boolean,              desc: 'build the gem (cleans old .gem artifacts first)'
-  opt :inc,     type: :boolean,              desc: 'write the commit-count version to .version (vstamp count)'
-  opt :publish, type: :boolean,              desc: 'inc + build + push to RubyGems'
-  opt :yes,     type: :boolean, default: false, desc: 'skip publish confirmation prompt'
+  desc 'Gem helpers. Bare invocation prints the current version.'
+  opt :build, type: :boolean, desc: 'build the gem (cleans old .gem artifacts first)'
 
   proc do |opts|
-    if opts[:publish]
-      hammer :gem, inc: true
-      hammer :gem, build: true
-
-      gem_file = Dir.glob('lux-hammer-*.gem').sort.last
-      error 'no built gem found' unless gem_file
-      error 'cancelled' unless opts[:yes] || yes?("push #{gem_file} to RubyGems?")
-      sh "gem push #{gem_file}"
-    elsif opts[:build]
+    if opts[:build]
       Dir.glob('*.gem').each do |f|
         File.delete(f)
         say "removed #{f}", :gray
       end
       sh 'gem build lux-hammer.gemspec'
-    elsif opts[:inc]
-      sh 'vstamp count'
     else
-      say Hammer::Version.read('.version')
+      say File.read('.version')[/^version: *(\S+)/, 1]
     end
+  end
+end
+
+task :deploy do
+  desc 'Test, stamp + tag + push the version (vstamp count --release), then push the gem to RubyGems'
+  proc do
+    # minitest runs at exit, so the suite needs its own process to gate the release
+    sh 'bin/hammer test'
+    sh 'vstamp count --release'
+    hammer :gem, build: true
+    sh "gem push lux-hammer-#{File.read('.version')[/^version: *(\S+)/, 1]}.gem"
   end
 end
 
