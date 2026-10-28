@@ -48,6 +48,9 @@ module LlmUsage
   CLAUDE_OAUTH_BETA ||= 'oauth-2025-04-20'
   CLAUDE_KEYCHAIN_SERVICE ||= 'Claude Code-credentials'
   CLAUDE_CREDENTIALS_PATH ||= File.expand_path('~/.claude/.credentials.json')
+  # omp keeps its own Anthropic OAuth login here and refreshes it while it runs,
+  # so it stays live when Claude Code (and its keychain token) sits idle.
+  OMP_AGENT_DB ||= File.expand_path('~/.omp/agent/agent.db')
   CODEX_SESSION_GLOB ||= File.expand_path('~/.codex/sessions/**/rollout-*.jsonl')
   CODEX_INIT_RPC  ||= '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"llm-usage","version":"1.0"}}}'
   CODEX_LIMITS_RPC ||= '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}'
@@ -469,7 +472,7 @@ module LlmUsage
   # seven_day_opus/_sonnet and extra_usage, already in parse_claude's shape.
   def fetch_claude_oauth_usage(now: Time.now)
     token = claude_oauth_token(now: now)
-    return [nil, 'claude: no usable OAuth token (run `claude` to sign in or refresh)'] unless token
+    return [nil, 'claude: no usable OAuth token (run `claude` or `omp` to sign in or refresh)'] unless token
 
     uri = URI(CLAUDE_USAGE_URL)
     response = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 3, read_timeout: 5) do |http|
@@ -487,19 +490,48 @@ module LlmUsage
     [nil, "claude: usage API unreachable (#{e.message})"]
   end
 
-  # Credentials file (Linux) first, then the macOS keychain. An expired token
-  # is treated as absent rather than refreshed here — that's Claude Code's job,
-  # and refreshing behind its back would invalidate its copy.
-  def claude_oauth_token(now: Time.now, path: CLAUDE_CREDENTIALS_PATH)
+  # Claude Code's credentials file (Linux), then the macOS keychain, then omp's
+  # login - whichever is still valid. An expired token is treated as absent
+  # rather than refreshed here: that's the owning CLI's job, and refreshing
+  # behind its back would invalidate its copy.
+  def claude_oauth_token(now: Time.now, path: CLAUDE_CREDENTIALS_PATH, omp_db: OMP_AGENT_DB)
+    claude_code_oauth_token(now: now, path: path) || omp_anthropic_oauth_token(now: now, db: omp_db)
+  end
+
+  def claude_code_oauth_token(now:, path:)
     creds = read_json(path) || claude_keychain_credentials
     oauth = creds.is_a?(Hash) ? creds['claudeAiOauth'] : nil
     return nil unless oauth.is_a?(Hash)
 
-    token = oauth['accessToken']
-    return nil if token.nil? || token.empty?
+    live_token(oauth['accessToken'], oauth['expiresAt'], now)
+  end
 
-    expires_at = oauth['expiresAt']
-    return nil if expires_at && Time.at(expires_at.to_i / 1000) <= now
+  # Read-only through the sqlite3 CLI: no gem dependency, and never contends
+  # with omp's own writes. Newest live credential wins when several are stored.
+  def omp_anthropic_oauth_token(now:, db:)
+    return nil unless File.file?(db)
+
+    sql = "SELECT data FROM auth_credentials WHERE provider = 'anthropic' " \
+          "AND credential_type = 'oauth' AND disabled_cause IS NULL ORDER BY updated_at DESC"
+    out, status = Open3.capture2('sqlite3', '-readonly', db, sql)
+    return nil unless status.success?
+
+    out.each_line do |line|
+      data = JSON.parse(line)
+      token = live_token(data['access'], data['expires'], now)
+      return token if token
+    rescue JSON::ParserError
+      next
+    end
+    nil
+  rescue Errno::ENOENT
+    nil
+  end
+
+  # expires_ms is epoch milliseconds, as both Claude Code and omp store it.
+  def live_token(token, expires_ms, now)
+    return nil if token.nil? || token.empty?
+    return nil if expires_ms && Time.at(expires_ms.to_i / 1000) <= now
 
     token
   end

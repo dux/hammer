@@ -13,8 +13,8 @@ desc <<~TXT
 
   Commands:
     usage    subscription limits and per-model token usage
-    wrap     run a command with your last two prompts pinned to the screen
-    wrap:run start claude / codex / grok / opencode in wrap, same -c -f -b switches for all
+    wrap     run a command with your last two prompts pinned to the screen (-a: no sleep while working)
+    wrap:run start claude / codex / grok / opencode / omp in wrap, same -c -f -b -a switches for all
 TXT
 
 require 'fileutils'
@@ -45,7 +45,8 @@ task :usage do
     `~/.grok/logs/unified.jsonl` for the period end; tokens still sum
     inference_done events in that log. Claude 5h/week windows come from the
     statusline snapshot at `~/.cache/llm/claude-limits.json`, falling back to
-    the OAuth usage API. Per-model weekly windows (Fable) get their own row and
+    the OAuth usage API (Claude Code's token, else omp's from
+    `~/.omp/agent/agent.db`). Per-model weekly windows (Fable) get their own row and
     come from that API either way - the snapshot doesn't carry them. `month`
     shows Claude extra-usage credits (API only, and only when you've enabled
     them).
@@ -124,6 +125,12 @@ task :wrap do
     Code turns on the last two). Mouse reports, focus events, arrows and Ctrl-<key> are
     not text and are dropped - including Ctrl-V, which pastes an image in Claude Code.
 
+    --awake keeps the Mac from sleeping while the agent is working - the spinner herdr
+    shows for this pane - and lets it sleep again once the agent is idle, blocked or
+    done; the rule reads "prompt history · awake" meanwhile. Each wrap holds its own
+    caffeinate, so with several tabs the Mac sleeps only when none is working. Outside
+    herdr it holds for the whole run. The display still sleeps, and so does a closed lid.
+
     LLM_WRAP_DEBUG=<file> logs what arrived and how it was read, for when a terminal
     reports keys in some way this does not know about. It records every keystroke.
 
@@ -141,6 +148,7 @@ task :wrap do
   example 'wrap claude'
   example 'wrap -- claude --resume'
   example 'wrap --lines 5 -- bash -l'
+  example 'wrap --awake -- claude'
 
   # `positional: false` is load-bearing: the parser fills un-set scalar opts
   # from positionals in declaration order, so without it `llm wrap claude`
@@ -149,6 +157,7 @@ task :wrap do
   opt :lines, type: :integer, default: 3, positional: false,
               desc: 'how many recent prompts to pin', placeholder: 'N'
   opt :config, type: :boolean, desc: 'open the command list in $EDITOR'
+  opt :awake,  type: :boolean, alias: :a, desc: 'block Mac sleep while the agent is working (herdr status)'
 
   proc do |opts|
     # Required lazily - llm.rb also runs as a per-prompt hook (`llm prompt
@@ -188,8 +197,8 @@ task :wrap do
     # rebuilt from what the parser gave us, since by then the real command line
     # is a resolved interpreter chain nobody typed. `--` keeps a wrapped
     # command's own flags out of our parser when it is read back.
-    origin = ['llm', 'wrap', '--lines', opts[:lines].to_s, '--', *cmd]
-    exit LlmWrap.run(cmd, keep: opts[:lines], origin:)
+    origin = ['llm', 'wrap', '--lines', opts[:lines].to_s, *('--awake' if opts[:awake]), '--', *cmd]
+    exit LlmWrap.run(cmd, keep: opts[:lines], origin:, awake: opts[:awake])
   end
 end
 
@@ -198,24 +207,26 @@ namespace :wrap do
     desc <<~D
       Start an agent CLI inside `llm wrap`, with the same switches whichever one it is.
 
-      TOOL is a prefix of claude, codex, grok or opencode - first match wins, so `c` is
-      claude and `co` is codex. No tool means claude. The switches map to what each
-      CLI actually takes:
+      TOOL is a prefix of claude, codex, grok, opencode or omp - first match wins, so `c` is
+      claude, `co` codex, `o` opencode and `om` omp. No tool means claude. The switches map
+      to what each CLI actually takes:
 
-        -c  continue the last session here    claude/grok/opencode -c, codex resume --last
+        -c  continue the last session here    claude/grok/opencode/omp -c, codex resume --last
         -f  full permissions, no prompts      --dangerously-skip-permissions, --dangerously-bypass-
-                                              approvals-and-sandbox, --always-approve, --auto
+                                              approvals-and-sandbox, --always-approve, --auto,
+                                              --auto-approve
         -b  bare - no AGENTS.md injection     skips the default below
 
-      --update runs each CLI's own updater (claude/codex/grok update, opencode upgrade),
+      --update runs each CLI's own updater (claude/codex/grok/omp update, opencode upgrade),
       reports old -> new, then re-reads the model lists and shows what appeared or
       disappeared since the last run. A TOOL prefix scopes it to that one tool; no prefix
-      updates all four.
+      updates all five.
 
       By default every AGENTS.md from ~ down to cwd is handed to the tool: claude
       --append-system-prompt, codex -c developer_instructions, grok --rules, opencode
       inline config. codex, grok and opencode read AGENTS.md from the git root down by
       themselves, so they only get the files above the repo; claude gets the whole chain.
+      omp walks AGENTS.md from cwd up to ~ by itself, so it gets nothing added.
       Anything after `--` is handed to the tool untouched. `~/bin/ai` is this command.
     D
     example 'wrap:run'
@@ -228,6 +239,7 @@ namespace :wrap do
     opt :full,     type: :boolean, desc: 'full permissions, no approval prompts'
     opt :bare,     type: :boolean, desc: 'bare agent - do not inject AGENTS.md'
     opt :update,   type: :boolean, desc: 'update the agent CLIs, then show model changes'
+    opt :awake,    type: :boolean, alias: :a, desc: 'block Mac sleep while the agent is working'
 
     proc do |opts|
       require File.join(_llm_root, 'lib/llm/wrap')
@@ -248,11 +260,11 @@ namespace :wrap do
       ENV.update(launch.env)
       say.gray "agents: #{launch.files.map { |f| f.to_s.sub(Dir.home, '~') }.join(', ')}" if launch.files.any?
 
-      flags = %i[continue full bare].select { |k| opts[k] }.map { |k| "--#{k}" }
+      flags = %i[continue full bare awake].select { |k| opts[k] }.map { |k| "--#{k}" }
       origin = ['llm', 'wrap:run', tool, *flags, '--', *extra]
       # Piped stdout is block-buffered and exec drops the buffer with the banner in it.
       $stdout.flush
-      exit LlmWrap.run(launch.argv, origin: origin)
+      exit LlmWrap.run(launch.argv, origin: origin, awake: opts[:awake])
     end
   end
 end

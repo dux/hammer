@@ -28,11 +28,18 @@ module LlmLaunch
     'opencode' => { continue: %w[-c],            full: %w[--auto],
                     update: %w[opencode upgrade], version: %w[opencode --version], models: %w[opencode models],
                     agents: ->(_text, files) { { env: { 'OPENCODE_CONFIG_CONTENT' => { instructions: files }.to_json } } } },
+    'omp'      => { continue: %w[-c],            full: %w[--auto-approve],
+                    update: %w[omp update],      version: %w[omp --version],      models: %w[omp models],
+                    agents: ->(text, _files) { { args: ['--append-system-prompt', text] } } },
   }.freeze
 
   # Read AGENTS.md from the git root down on their own; we only add the
   # files above it for these. Claude reads CLAUDE.md, so it gets the chain.
   NATIVE_AGENTS ||= %w[codex grok opencode].freeze
+
+  # Walk AGENTS.md from cwd up to ~ on their own, so nothing is added. omp
+  # skips ~/AGENTS.md inside a repo - its user-level file is ~/.omp/agent/AGENTS.md.
+  HOME_AGENTS ||= %w[omp].freeze
 
   # First tool whose name starts with the prefix, in TOOLS order: `c` is
   # claude, `co` codex. No prefix means claude.
@@ -68,6 +75,7 @@ module LlmLaunch
       stop = IO.popen(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], err: File::NULL, &:read).to_s.strip
       stop = cwd if stop.empty?
     end
+    stop = home if HOME_AGENTS.include?(tool)
 
     Pathname(cwd).ascend
       .select { |dir| dir.to_s.start_with?(home) }

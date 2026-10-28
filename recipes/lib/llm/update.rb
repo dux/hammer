@@ -16,10 +16,12 @@ module LlmUpdate
 
   # How each CLI prints its list: grok bullets it under a preamble ("You are
   # not authenticated." when logged out) and marks the default, opencode prints
-  # one bare provider/model per line.
+  # one bare provider/model per line, omp boxes per-provider tables whose first
+  # column is the model id (the `model` header row is skipped).
   MODEL_RE ||= {
     'grok'     => /\A\s*[*-]\s+(\S+)/,
     'opencode' => %r{\A(\S+/\S+)\z},
+    'omp'      => /\A│ (?!model\s)(\S+)\s+│/,
   }.freeze
 
   module_function
@@ -100,7 +102,7 @@ module LlmUpdate
     parse_models(tool, capture(LlmLaunch::TOOLS.fetch(tool)[:models]))
   end
 
-  # `2.1.268 (Claude Code)`, `codex-cli 0.154.0`, `grok 1.0.25 (f7e67d6) [stable]`, `1.18.30`
+  # `2.1.268 (Claude Code)`, `codex-cli 0.154.0`, `grok 1.0.25 (f7e67d6) [stable]`, `1.18.30`, `omp/18.12.5`
   def parse_version(out)
     out.to_s.lines.first.to_s[/\d+\.\d+(?:\.\d+)*/]
   end

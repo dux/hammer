@@ -37,6 +37,21 @@ class LlmUpdateTest < Minitest::Test
                  LlmUpdate.parse_models('opencode', OPENCODE_MODELS)
   end
 
+  OMP_MODELS = <<~OUT
+    anthropic (2)
+    ┌──────────────────┬─────────┐
+    │ model            │ context │
+    ├──────────────────┼─────────┤
+    │ claude-opus-5    │      1M │
+    │ claude-sonnet-5  │      1M │
+    └──────────────────┴─────────┘
+  OUT
+
+  def test_parse_models_reads_omp_table_first_column
+    assert_equal %w[claude-opus-5 claude-sonnet-5], LlmUpdate.parse_models('omp', OMP_MODELS)
+    assert_equal '18.12.5', LlmUpdate.parse_version("omp/18.12.5\n")
+  end
+
   def test_parse_models_on_empty_output
     assert_empty LlmUpdate.parse_models('grok', '')
     assert_empty LlmUpdate.parse_models('opencode', "no providers configured\n")

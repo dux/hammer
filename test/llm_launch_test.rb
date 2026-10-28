@@ -8,6 +8,7 @@ class LlmLaunchTest < Minitest::Test
     assert_equal 'codex',    LlmLaunch.tool('co')
     assert_equal 'grok',     LlmLaunch.tool('g')
     assert_equal 'opencode', LlmLaunch.tool('o')
+    assert_equal 'omp',      LlmLaunch.tool('om')
     assert_nil LlmLaunch.tool('x')
   end
 
@@ -18,6 +19,7 @@ class LlmLaunchTest < Minitest::Test
                  LlmLaunch.build('codex', continue: true, full: true, bare: true).argv
     assert_equal %w[grok -c --always-approve], LlmLaunch.build('grok', continue: true, full: true, bare: true).argv
     assert_equal %w[opencode -c --auto], LlmLaunch.build('opencode', continue: true, full: true, bare: true).argv
+    assert_equal %w[omp -c --auto-approve], LlmLaunch.build('omp', continue: true, full: true, bare: true).argv
   end
 
   # A tool added to the registry without these is invisible to `--update`.
@@ -53,6 +55,10 @@ class LlmLaunchTest < Minitest::Test
       assert_equal %w[opencode], opencode.argv
       assert_equal({ 'instructions' => ["#{home}/AGENTS.md", "#{home}/dev/AGENTS.md"] },
                    JSON.parse(opencode.env['OPENCODE_CONFIG_CONTENT']))
+
+      omp = LlmLaunch.build('omp', cwd: cwd, home: home)
+      assert_equal %w[omp], omp.argv
+      assert_equal [], omp.files
     end
   end
 

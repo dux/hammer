@@ -65,15 +65,17 @@ module LlmWrap
   # it again - only the caller knows that, since taking the child's name throws
   # our own command line away. It is what Handoff writes down; the child's argv
   # stands in when nobody says.
-  def self.run(argv, keep: DEFAULT_KEEP, origin: argv)
+  def self.run(argv, keep: DEFAULT_KEEP, origin: argv, awake: false)
     keep = keep.to_i.clamp(1, MAX_KEEP)
-    return passthrough(argv) unless $stdin.tty? && $stdout.tty?
+    # No session to watch from, so --awake holds for the whole run instead.
+    bare = awake ? Awake.wrap(argv) : argv
+    return passthrough(bare) unless $stdin.tty? && $stdout.tty?
 
     rows, = $stdout.winsize
     # Leave the child a usable screen, or skip the bar entirely.
-    return passthrough(argv) if rows.to_i < keep + 4
+    return passthrough(bare) if rows.to_i < keep + 4
 
-    Session.new(argv, keep, origin).run
+    Session.new(argv, keep, origin, awake:).run
   end
 
   # No terminal to draw on (piped, scripted, inside another wrapper), so get
@@ -303,10 +305,117 @@ module LlmWrap
     end
   end
 
+  # Keeps the Mac awake while the agent in this pane is working (`--awake`).
+  #
+  # Herdr already knows: the working spinner in its sidebar is `agent_status`
+  # on our own pane, which we can ask for over its socket - the pane id is in
+  # our environment. While it reads `working` we hold a `caffeinate`, and let
+  # go once it has read anything else twice in a row, so the idle blink between
+  # two tool calls does not flap it. macOS counts assertions, so with several
+  # wrapped agents the machine sleeps only when none of them is working.
+  #
+  # Outside herdr there is nothing to ask, so the assertion is held for the
+  # whole session. A thread, so a slow socket never stalls the pump; it never
+  # touches the screen, only reports a change through on_change.
+  class Awake
+    POLL    ||= 3
+    TIMEOUT ||= 2
+    RELEASE ||= 2   # polls in a row that are not `working`
+    SOCKET  ||= File.expand_path('~/.config/herdr/herdr.sock')
+
+    def initialize(on_change: nil)
+      @pane      = ENV['HERDR_PANE_ID'].to_s
+      @socket    = ENV['HERDR_SOCKET_PATH'].to_s.then { |s| s.empty? ? SOCKET : s }
+      @on_change = on_change
+      @pid       = nil
+      @lock      = Mutex.new
+    end
+
+    # The argv to exec instead, when there is no session to watch from.
+    def self.wrap(argv)
+      ['caffeinate', '-i', '-s', *argv]
+    end
+
+    def start
+      return hold if @pane.empty?
+
+      @thread = Thread.new do
+        quiet = 0
+        loop do
+          if status == 'working'
+            quiet = 0
+            hold
+          elsif (quiet += 1) >= RELEASE
+            release
+          end
+          sleep POLL
+        end
+      rescue StandardError
+        release
+      end
+    end
+
+    def stop
+      @thread&.kill
+      @thread = nil
+      release
+    end
+
+    def awake?
+      !@pid.nil?
+    end
+
+    private
+
+    # -w ties caffeinate to us, so even a kill -9 of the wrapper lets go.
+    def hold
+      @lock.synchronize do
+        return if @pid
+
+        @pid = Process.spawn('caffeinate', '-i', '-s', '-w', Process.pid.to_s,
+                             %i[out err] => File::NULL)
+      end
+      @on_change&.call(true)
+    rescue SystemCallError
+      nil
+    end
+
+    def release
+      pid = @lock.synchronize { @pid.tap { @pid = nil } }
+      return unless pid
+
+      begin
+        Process.kill('TERM', pid)
+        Process.wait(pid)
+      rescue SystemCallError
+        nil
+      end
+      @on_change&.call(false)
+    end
+
+    # One NDJSON request, one line back. Anything going wrong reads as "not
+    # working" - when in doubt, let the machine sleep.
+    def status
+      require 'json'
+      require 'socket'
+
+      UNIXSocket.open(@socket) do |sock|
+        sock.write("#{JSON.generate(id: 'llm-wrap-awake', method: 'pane.get', params: { pane_id: @pane })}\n")
+        return nil unless IO.select([sock], nil, nil, TIMEOUT)
+
+        line = sock.gets
+        line && JSON.parse(line).dig('result', 'pane', 'agent_status')
+      end
+    rescue StandardError
+      nil
+    end
+  end
+
   class Session
-    def initialize(argv, keep, origin = argv)
+    def initialize(argv, keep, origin = argv, awake: false)
       @argv     = argv
       @origin   = origin
+      @awake    = awake
       @bar_rows = keep + 1     # the prompts, plus the rule above them
       @keys     = KeyBuffer.new(keep)
       @pane     = nil          # the last ! command's output, while one is up
@@ -334,11 +443,13 @@ module LlmWrap
       Signal.trap('WINCH') { @winch = true }
 
       begin
+        start_awake if @awake
         enter_screen
         # raw leaves ISIG off, so Ctrl-C reaches the child as a plain 0x03 byte
         # and its own line discipline signals it. We must not trap SIGINT here.
         $stdin.raw { pump }
       ensure
+        @awake_watch&.stop
         leave_screen
         Handoff.clear
       end
@@ -370,6 +481,16 @@ module LlmWrap
       Process.setproctitle(File.basename(@argv.first.to_s))
     rescue StandardError
       nil
+    end
+
+    # The watcher's thread only flips flags; painting stays on the pump.
+    def start_awake
+      @awake_watch = Awake.new(on_change: lambda do |on|
+        @keys.awake = on
+        trace('AWK', on ? 'hold' : 'release')
+        @dirty = true
+      end)
+      @awake_watch.start
     end
 
     def child_rows
@@ -1052,6 +1173,7 @@ module LlmWrap
     #   bangs   ! lines submitted in it, in order. An empty one is a bare !.
     #   typing? there is a line on the go, so the screen is wanted for it.
     attr_reader :pass, :bangs
+    attr_writer :awake   # Session flips it while Awake holds the Mac up
 
     def typing? = !@buf.empty?
     def bang?   = @bang
@@ -1099,7 +1221,7 @@ module LlmWrap
       end
 
       rows[-1] = typing(cols) if @bang
-      [rule(cols, LABEL)] + rows
+      [rule(cols, @awake ? "#{LABEL} · awake" : LABEL)] + rows
     end
 
     private

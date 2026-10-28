@@ -481,7 +481,32 @@ class LlmUsageTest < Minitest::Test
       path = File.join(dir, 'credentials.json')
       File.write(path, { 'claudeAiOauth' => { 'accessToken' => 'tok', 'expiresAt' => (NOW - 1).to_i * 1000 } }.to_json)
 
-      assert_nil LlmUsage.claude_oauth_token(now: NOW, path: path)
+      assert_nil LlmUsage.claude_oauth_token(now: NOW, path: path, omp_db: File.join(dir, 'missing.db'))
+    end
+  end
+
+  # Claude Code idle -> its token expired; omp's newest live login takes over.
+  def test_claude_oauth_token_falls_back_to_live_omp_credential
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'credentials.json')
+      File.write(path, { 'claudeAiOauth' => { 'accessToken' => 'stale', 'expiresAt' => (NOW - 1).to_i * 1000 } }.to_json)
+      db = File.join(dir, 'agent.db')
+      row = lambda do |access, expires, updated, disabled = 'NULL'|
+        data = { 'access' => access, 'expires' => expires.to_i * 1000 }.to_json
+        "INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause, updated_at) " \
+          "VALUES ('anthropic', 'oauth', '#{data}', #{disabled}, #{updated});"
+      end
+      sql = [
+        'CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, ' \
+        'data TEXT, disabled_cause TEXT, updated_at INTEGER);',
+        row.call('expired', NOW - 60, 30),
+        row.call('disabled', NOW + 3600, 20, "'revoked'"),
+        row.call('live', NOW + 3600, 10)
+      ].join("\n")
+      _, status = Open3.capture2('sqlite3', db, stdin_data: sql)
+      assert status.success?
+
+      assert_equal 'live', LlmUsage.claude_oauth_token(now: NOW, path: path, omp_db: db)
     end
   end
 
